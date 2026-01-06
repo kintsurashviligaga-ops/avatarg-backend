@@ -1,15 +1,45 @@
-{
-  "name": "avatarg-backend",
-  "private": true,
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start"
-  },
-  "dependencies": {
-    "next": "14.1.0",
-    "react": "18.2.0",
-    "react-dom": "18.2.0",
-    "openai": "^4.25.0"
+import { NextResponse } from "next/server";
+
+export async function POST(req) {
+  try {
+    const body = await req.json();
+    const message = body?.message;
+
+    if (!message) {
+      return NextResponse.json(
+        { error: "Message is required" },
+        { status: 400 }
+      );
+    }
+
+    const apiKey = process.env.OPENAI_API_KEY;
+
+    if (!apiKey) {
+      throw new Error("OPENAI_API_KEY is missing");
+    }
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: message }],
+      }),
+    });
+
+    const data = await response.json();
+
+    return NextResponse.json({
+      reply: data.choices?.[0]?.message?.content || "No reply",
+    });
+  } catch (err) {
+    console.error("CHAT ERROR:", err);
+    return NextResponse.json(
+      { error: err.message },
+      { status: 500 }
+    );
   }
 }
