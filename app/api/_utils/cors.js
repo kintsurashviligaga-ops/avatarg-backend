@@ -1,38 +1,38 @@
-// app/api/_utils/cors.js
+  // app/api/_utils/cors.js
+const ALLOWED_ORIGINS = [
+  "https://avatar-g.vercel.app",
+  "http://localhost:3000",
+];
 
-/**
- * CORS helpers for Next.js App Router route handlers.
- * DEV MODE: allows all origins (*). Good until you buy a domain.
- */
+function getOrigin(req) {
+  return req.headers.get("origin") || "";
+}
 
-export function getCorsHeaders(req) {
+export function corsHeaders(req) {
+  const origin = getOrigin(req);
+  const allowOrigin = ALLOWED_ORIGINS.includes(origin)
+    ? origin
+    : "https://avatar-g.vercel.app";
+
   return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
-    "Access-Control-Allow-Headers":
-      "Content-Type, Authorization, X-Requested-With, Accept, Origin",
-    "Access-Control-Max-Age": "86400",
+    "Access-Control-Allow-Origin": allowOrigin,
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
+    "Access-Control-Allow-Credentials": "true",
     "Vary": "Origin",
   };
 }
 
-export function withCors(req, extraHeaders = {}) {
-  return { ...getCorsHeaders(req), ...extraHeaders };
-}
-
 export function corsPreflight(req) {
-  return new Response(null, {
-    status: 204,
-    headers: withCors(req),
-  });
+  return new Response(null, { status: 204, headers: corsHeaders(req) });
 }
 
-export function json(req, data, status = 200, extraHeaders = {}) {
+export function json(req, data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: withCors(req, {
+    headers: {
       "Content-Type": "application/json; charset=utf-8",
-      ...extraHeaders,
-    }),
+      ...corsHeaders(req),
+    },
   });
 }
