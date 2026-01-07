@@ -1,60 +1,48 @@
-import OpenAI from "openai";
-import { corsHeaders } from "../_utils/cors";
+// app/api/ai/route.js
+import { corsPreflight, json } from "../_utils/cors";
 
-export async function POST(req) {
-  try {
-    // Parse body safely
-    const body = await req.json().catch(() => ({}));
-    const message =
-      typeof body?.message === "string"
-        ? body.message
-        : typeof body?.input === "string"
-        ? body.input
-        : "";
-
-    if (!process.env.OPENAI_API_KEY) {
-      return new Response(
-        JSON.stringify({ ok: false, error: "OPENAI_API_KEY missing" }),
-        { status: 500, headers: corsHeaders }
-      );
-    }
-
-    if (!message.trim()) {
-      return new Response(
-        JSON.stringify({ ok: true, reply: "Write a message and I will answer." }),
-        { status: 200, headers: corsHeaders }
-      );
-    }
-
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-    const completion = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-      messages: [{ role: "user", content: message }],
-      temperature: 0.6,
-    });
-
-    const reply = completion?.choices?.[0]?.message?.content || "No reply.";
-
-    return new Response(
-      JSON.stringify({ ok: true, reply }),
-      { status: 200, headers: corsHeaders }
-    );
-  } catch (err) {
-    console.error("AI ROUTE ERROR:", err);
-
-    return new Response(
-      JSON.stringify({
-        ok: false,
-        error: "AI route crashed",
-        detail: String(err?.message || err),
-      }),
-      { status: 500, headers: corsHeaders }
-    );
-  }
+// ✅ CORS Preflight
+export async function OPTIONS(req) {
+  return corsPreflight(req);
 }
 
-// CORS preflight
-export async function OPTIONS() {
-  return new Response(null, { status: 204, headers: corsHeaders });
+// ✅ Main endpoint: POST /api/ai
+export async function POST(req) {
+  try {
+    const body = await req.json().catch(() => ({}));
+
+    const service = body?.service ?? "text";
+    const goal = body?.goal ?? "";
+    const outLang = body?.outLang ?? "ka";
+    const details = body?.details ?? "";
+    const notes = body?.notes ?? "";
+    const message = body?.message ?? "";
+    const filesCount = body?.filesCount ?? 0;
+    const consent = body?.consent;
+
+    // minimal validation
+    if (!details.trim() && !message.trim()) {
+      return json(req, { error: "Missing 'details' or 'message'." }, 400);
+    }
+
+    // voice consent check
+    if (service === "voice" && consent !== true) {
+      return json(req, { error: "Consent required for voice cloning." }, 400);
+    }
+
+    // ✅ TEMP reply (შენ რომ UI-ზე ნახო მუშაობს)
+    // შემდეგში აქ ჩასვამ OpenAI/LLM call-ს.
+    const reply =
+      `✅ Avatar G Backend OK\n` +
+      `Service: ${service}\n` +
+      `Lang: ${outLang}\n` +
+      `Goal: ${goal || "-"}\n` +
+      `Notes: ${notes || "-"}\n` +
+      `FilesCount: ${filesCount}\n\n` +
+      `Request:\n${(details || message).trim()}\n`;
+
+    return json(req, { reply }, 200);
+  } catch (err) {
+    return json(req, { error: err?.message || "Server error" }, 500);
+  }
 }
