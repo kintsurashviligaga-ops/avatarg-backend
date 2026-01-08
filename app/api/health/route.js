@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { withCORS, corsOPTIONS } from "../_utils/cors";
+import { withCORS, corsOPTIONS } from "../utils/cors";
 
 export async function GET(req) {
   return withCORS(
