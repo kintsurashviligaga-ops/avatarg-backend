@@ -1,201 +1,158 @@
 import { NextResponse } from "next/server";
-import { withCORS, corsOPTIONS } from "../utils/cors";
+import { withCORS, corsOPTIONS } from "../../utils/cors";
 
 const CONFIG = {
   MAX_MESSAGE_LENGTH: 6000,
   OPENAI_TIMEOUT_MS: 28000,
-  DEFAULT_MODEL: "gpt-4o-mini",
+  DEFAULT_MODEL: process.env.OPENAI_MODEL || "gpt-4o-mini",
 };
 
-export async function POST(req) {
-  try {
-    let body;
-    try {
-      body = await req.json();
-    } catch (e) {
-      return withCORS(
-        req,
-        NextResponse.json(
-          {
-            ok: false,
-            error: "Invalid JSON",
-            code: "INVALID_JSON",
-            details: "Request body must be valid JSON",
-          },
-          { status: 400 }
-        )
-      );
-    }
-
-    const message = (body?.message || "").toString().trim();
-    if (!message) {
-      return withCORS(
-        req,
-        NextResponse.json(
-          {
-            ok: false,
-            error: "Missing message",
-            code: "MISSING_MESSAGE",
-            details: "Request body must include 'message' field",
-          },
-          { status: 400 }
-        )
-      );
-    }
-
-    if (message.length > CONFIG.MAX_MESSAGE_LENGTH) {
-      return withCORS(
-        req,
-        NextResponse.json(
-          {
-            ok: false,
-            error: "Message too long",
-            code: "MESSAGE_TOO_LONG",
-            details: `Maximum ${CONFIG.MAX_MESSAGE_LENGTH} characters allowed`,
-          },
-          { status: 400 }
-        )
-      );
-    }
-
-    const conversationId = body?.conversation_id || null;
-    const mood = body?.mood || "auto";
-
-    // ✅ MOCK MODE
-    if (!process.env.OPENAI_API_KEY) {
-      console.warn("[AI] Running in MOCK mode - OPENAI_API_KEY not set");
-      return withCORS(
-        req,
-        NextResponse.json({
-          ok: true,
-          mode: "mock",
-          reply: `✅ Backend OK (MOCK mode)\n\nშენი მესიჯი მივიღე: "${message}"\n\nრეალური AI-სთვის დააყენე OPENAI_API_KEY environment variable.`,
-          conversation_id: conversationId,
-          mood_used: mood,
-        })
-      );
-    }
-
-    const model = process.env.OPENAI_MODEL || CONFIG.DEFAULT_MODEL;
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(
-      () => controller.abort(),
-      CONFIG.OPENAI_TIMEOUT_MS
-    );
-
-    try {
-      const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            {
-              role: "system",
-              content:
-                "You are Avatar G — a professional, helpful AI assistant for business, content creation, and automation. Reply clearly, concisely, and in the user's language (Georgian or English). Be warm but professional.",
-            },
-            { role: "user", content: message },
-          ],
-          temperature: 0.7,
-          max_tokens: 2000,
-        }),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!openaiRes.ok) {
-        const errorData = await openaiRes.json().catch(() => ({}));
-        const errorMessage =
-          errorData?.error?.message || `HTTP ${openaiRes.status}`;
-
-        return withCORS(
-          req,
-          NextResponse.json(
-            {
-              ok: false,
-              error: "OpenAI API error",
-              code: "OPENAI_ERROR",
-              status: openaiRes.status,
-              details: errorMessage,
-            },
-            { status: 502 }
-          )
-        );
-      }
-
-      const data = await openaiRes.json();
-      const reply =
-        data?.choices?.[0]?.message?.content?.toString().trim() ||
-        "No response generated.";
-
-      return withCORS(
-        req,
-        NextResponse.json({
-          ok: true,
-          reply,
-          model: data?.model || model,
-          conversation_id: conversationId,
-          mood_used: mood,
-          usage: data?.usage || null,
-        })
-      );
-    } catch (e) {
-      clearTimeout(timeoutId);
-
-      if (e.name === "AbortError") {
-        return withCORS(
-          req,
-          NextResponse.json(
-            {
-              ok: false,
-              error: "Request timeout",
-              code: "TIMEOUT",
-              details: `OpenAI request exceeded ${CONFIG.OPENAI_TIMEOUT_MS}ms timeout`,
-            },
-            { status: 504 }
-          )
-        );
-      }
-
-      return withCORS(
-        req,
-        NextResponse.json(
-          {
-            ok: false,
-            error: "Network error",
-            code: "NETWORK_ERROR",
-            details: e.message || "Failed to reach OpenAI API",
-          },
-          { status: 502 }
-        )
-      );
-    }
-  } catch (e) {
-    console.error("[AI] Unexpected error:", e);
-    return withCORS(
-      req,
-      NextResponse.json(
-        {
-          ok: false,
-          error: "Internal server error",
-          code: "SERVER_ERROR",
-          details:
-            process.env.NODE_ENV === "development"
-              ? e.message
-              : "An unexpected error occurred",
-        },
-        { status: 500 }
-      )
-    );
-  }
+function jsonError(req, status, code, message, extra = {}) {
+  return withCORS(
+    req,
+    NextResponse.json(
+      {
+        ok: false,
+        error: message,
+        code,
+        ...extra,
+      },
+      { status }
+    )
+  );
 }
 
 export async function OPTIONS(req) {
   return corsOPTIONS(req);
+}
+
+export async function POST(req) {
+  try {
+    // 1) Parse JSON body safely
+    let body;
+    try {
+      body = await req.json();
+    } catch (e) {
+      return jsonError(req, 400, "INVALID_JSON", "Request body must be valid JSON", {
+        details: "Expected JSON body",
+      });
+    }
+
+    // 2) Validate input
+    const message =
+      typeof body?.message === "string" ? body.message.trim() : "";
+
+    if (!message) {
+      return jsonError(req, 400, "MISSING_MESSAGE", "Field `message` is required");
+    }
+
+    if (message.length > CONFIG.MAX_MESSAGE_LENGTH) {
+      return jsonError(
+        req,
+        413,
+        "MESSAGE_TOO_LONG",
+        `Message too long. Max is ${CONFIG.MAX_MESSAGE_LENGTH} characters.`,
+        { max: CONFIG.MAX_MESSAGE_LENGTH, got: message.length }
+      );
+    }
+
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      return jsonError(
+        req,
+        500,
+        "OPENAI_KEY_MISSING",
+        "Server is missing OPENAI_API_KEY environment variable"
+      );
+    }
+
+    // 3) Call OpenAI (chat/completions compatible)
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      CONFIG.OPENAI_TIMEOUT_MS
+    );
+
+    let upstream;
+    try {
+      upstream = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: CONFIG.DEFAULT_MODEL,
+          messages: [
+            {
+              role: "system",
+              content:
+                "You are Avatar G — a helpful, professional assistant for the Avatar G Workspace. Reply clearly and concisely.",
+            },
+            { role: "user", content: message },
+          ],
+          temperature: 0.4,
+        }),
+        signal: controller.signal,
+      });
+    } catch (e) {
+      clearTimeout(timeout);
+      const isAbort =
+        e?.name === "AbortError" ||
+        String(e?.message || "").toLowerCase().includes("aborted");
+
+      return jsonError(
+        req,
+        isAbort ? 504 : 502,
+        isAbort ? "OPENAI_TIMEOUT" : "OPENAI_FETCH_FAILED",
+        isAbort
+          ? "OpenAI request timed out"
+          : "Failed to reach OpenAI API",
+        { details: String(e?.message || e) }
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    // 4) Handle upstream errors
+    const text = await upstream.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
+    }
+
+    if (!upstream.ok) {
+      return jsonError(
+        req,
+        upstream.status || 502,
+        "OPENAI_ERROR",
+        "OpenAI API returned an error",
+        {
+          status: upstream.status,
+          details: data || text,
+        }
+      );
+    }
+
+    const reply =
+      data?.choices?.[0]?.message?.content ??
+      data?.choices?.[0]?.text ??
+      "";
+
+    return withCORS(
+      req,
+      NextResponse.json({
+        ok: true,
+        model: CONFIG.DEFAULT_MODEL,
+        reply,
+        usage: data?.usage || null,
+      })
+    );
+  } catch (e) {
+    return jsonError(req, 500, "INTERNAL_ERROR", "Unexpected server error", {
+      details: String(e?.message || e),
+    });
+  }
 }
