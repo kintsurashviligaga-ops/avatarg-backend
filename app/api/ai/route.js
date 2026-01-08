@@ -1,100 +1,85 @@
 import { NextResponse } from "next/server";
-import { withCORS, corsOPTIONS } from "../../_utils/cors";
+import { withCORS, corsOPTIONS } from "../_utils/cors";
 
-// POST /api/ai
-// Body: { "message": "..." }
-// თუ OPENAI_API_KEY არ გაქვს env-ში → აბრუნებს mock პასუხს, რომ API ცოცხალია.
 export async function POST(req) {
   try {
     const body = await req.json().catch(() => ({}));
-    const message = (body?.message ?? "").toString();
+    const message = (body?.message || "").toString().trim();
+    const model = (body?.model || "gpt-4o-mini").toString();
 
-    // ✅ Mock რეჟიმი (თუ env-ში OPENAI_API_KEY არ არის)
+    if (!message) {
+      return withCORS(
+        req,
+        NextResponse.json({ ok: false, error: "Message is required" }, { status: 400 })
+      );
+    }
+
+    // ✅ MOCK mode (no key) — always returns stable response
     if (!process.env.OPENAI_API_KEY) {
       return withCORS(
+        req,
         NextResponse.json({
           ok: true,
           mode: "mock",
-          reply: message
-            ? `მივიღე: "${message}". (Mock რეჟიმი — დააყენე OPENAI_API_KEY რომ რეალურად იმუშაოს)`
-            : "მზად ვარ. (Mock რეჟიმი — დააყენე OPENAI_API_KEY რომ რეალურად იმუშაოს)",
+          reply: `✅ Avatar G (mock) received: "${message}"`,
         })
       );
     }
 
-    // ✅ რეალური OpenAI call (Chat Completions)
-    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+    // ✅ REAL OpenAI mode
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+        model,
+        temperature: 0.5,
         messages: [
           {
             role: "system",
             content:
-              "You are Avatar G AI — helpful, concise, and professional. Reply in Georgian unless user asks otherwise.",
+              "You are Avatar G — a professional, helpful AI assistant for business and content automation. Keep answers clear and actionable.",
           },
-          { role: "user", content: message || "გამარჯობა" },
+          { role: "user", content: message },
         ],
-        temperature: 0.7,
       }),
     });
 
-    const data = await resp.json();
-
-    if (!resp.ok) {
+    if (!response.ok) {
+      const errText = await response.text().catch(() => "");
       return withCORS(
+        req,
         NextResponse.json(
-          {
-            ok: false,
-            error: data?.error?.message || "OpenAI request failed",
-            details: data,
-          },
-          { status: resp.status }
+          { ok: false, error: "OpenAI request failed", details: errText.slice(0, 800) },
+          { status: 500 }
         )
       );
     }
 
-    const reply =
-      data?.choices?.[0]?.message?.content?.trim() ||
-      "ვერ მივიღე პასუხი მოდელიდან.";
+    const data = await response.json();
+    const reply = data?.choices?.[0]?.message?.content?.trim() || "";
 
     return withCORS(
+      req,
       NextResponse.json({
         ok: true,
         mode: "openai",
         reply,
       })
     );
-  } catch (err) {
+  } catch (e) {
     return withCORS(
+      req,
       NextResponse.json(
-        {
-          ok: false,
-          error: err?.message || "Server error",
-        },
+        { ok: false, error: "Server error", details: String(e?.message || e) },
         { status: 500 }
       )
     );
   }
 }
 
-// ✅ Preflight (CORS)
-export async function OPTIONS() {
-  return corsOPTIONS();
+export async function OPTIONS(req) {
+  return corsOPTIONS(req);
 }
-
-// ✅ მარტივი GET რომ ბრაუზერში გახსნა მუშაობდეს
-export async function GET() {
-  return withCORS(
-    NextResponse.json({
-      ok: true,
-      endpoint: "/api/ai",
-      methods: ["GET", "POST", "OPTIONS"],
-      note: "POST body: { message: string }",
-    })
-  );
-        }
