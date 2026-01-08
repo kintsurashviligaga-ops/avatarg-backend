@@ -1,18 +1,15 @@
 import { NextResponse } from "next/server";
 
 /**
- * AVATAR G — Production CORS Utility (Hardened)
+ * Avatar G — Production CORS Utility (Hardened)
+ *
+ * ✅ Uses ONLY allowlist / regex / explicit fallback
+ * ✅ No wildcard with credentials
+ * ✅ Proper OPTIONS preflight
  *
  * ENV (recommended):
- * - FRONTEND_ORIGINS="https://avatar-g.vercel.app,https://yourdomain.com"
- * - FRONTEND_ORIGIN_REGEX="^https:\\/\\/avatar-g(-[a-z0-9-]+)?\\.vercel\\.app$"
- *
- * Why this version:
- * - Fixes "Failed to fetch" / CORS errors
- * - Proper OPTIONS preflight
- * - Safe with credentials (never uses "*")
- * - ✅ IMPORTANT FIX: does NOT allow all *.vercel.app
- *   Instead allows only avatar-g deployments via regex or allowlist
+ * FRONTEND_ORIGINS="https://avatar-g.vercel.app"
+ * FRONTEND_ORIGIN_REGEX="^https:\\/\\/avatar-g(-[a-z0-9-]+)?\\.vercel\\.app$"
  */
 
 function getAllowedOrigins() {
@@ -27,16 +24,16 @@ function isAllowedOrigin(origin) {
   if (!origin) return false;
   const normalized = origin.replace(/\/$/, "");
 
-  // ✅ Step 1: explicit allowlist
+  // 1) explicit allowlist
   const allowList = getAllowedOrigins();
   if (allowList.includes(normalized)) return true;
 
-  // ✅ Step 2: dev defaults
+  // 2) dev defaults
   if (normalized === "http://localhost:3000") return true;
   if (normalized === "http://localhost:5173") return true;
   if (normalized === "http://127.0.0.1:3000") return true;
 
-  // ✅ Step 3: optional regex (preview deployments)
+  // 3) regex pattern (preview deployments)
   const reRaw = process.env.FRONTEND_ORIGIN_REGEX;
   if (reRaw) {
     try {
@@ -47,7 +44,7 @@ function isAllowedOrigin(origin) {
     }
   }
 
-  // ✅ Step 4: SAFE fallback (ONLY your production frontend)
+  // 4) safe fallback (ONLY your main frontend)
   if (normalized === "https://avatar-g.vercel.app") return true;
 
   return false;
@@ -66,14 +63,13 @@ function applyCorsHeaders(headers, origin) {
     headers.set("Access-Control-Allow-Origin", origin);
     headers.set("Access-Control-Allow-Credentials", "true");
   } else if (origin) {
-    // Don’t set Allow-Origin for untrusted origins
     console.warn("[CORS] Rejected origin:", origin);
   }
 
   return headers;
 }
 
-/** Wrap existing NextResponse with CORS headers */
+/** Wrap NextResponse with CORS headers */
 export function withCORS(req, res) {
   const origin = req.headers.get("origin") || req.headers.get("Origin");
   applyCorsHeaders(res.headers, origin);
