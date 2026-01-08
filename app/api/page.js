@@ -1,4 +1,4 @@
-export default function Home() {
+export default function HomePage() {
   return (
     <main
       style={{
@@ -6,54 +6,65 @@ export default function Home() {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "#0b1220",
+        background: "linear-gradient(180deg, #06121a 0%, #0a2533 100%)",
         color: "white",
-        padding: 24,
+        fontFamily:
+          "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
         textAlign: "center",
+        padding: 32,
       }}
     >
-      <div style={{ maxWidth: 720 }}>
-        <h1 style={{ fontSize: 42, margin: 0, marginBottom: 12 }}>
-          Avatar G Backend 🚀
+      <div>
+        <div
+          style={{
+            width: 80,
+            height: 80,
+            margin: "0 auto 24px",
+            borderRadius: 20,
+            background:
+              "radial-gradient(circle at 30% 30%, rgba(34,211,238,0.9), rgba(59,130,246,0.7))",
+            boxShadow: "0 12px 40px rgba(34,211,238,0.25)",
+          }}
+        />
+
+        <h1
+          style={{
+            fontSize: 48,
+            fontWeight: 800,
+            marginBottom: 12,
+            background: "linear-gradient(90deg, #22d3ee, #3b82f6)",
+            WebkitBackgroundClip: "text",
+            WebkitTextFillColor: "transparent",
+            backgroundClip: "text",
+          }}
+        >
+          Avatar G Backend
         </h1>
-        <p style={{ opacity: 0.8, marginTop: 0 }}>
-          Next.js API • OpenAI • Supabase • Stripe
+
+        <p style={{ opacity: 0.75, fontSize: 16, marginBottom: 32 }}>
+          Next.js 14 API • OpenAI • Production Ready
         </p>
 
-        <div style={{ marginTop: 28, display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
           <a
             href="/api/health"
             style={{
-              padding: "12px 18px",
+              display: "inline-block",
+              padding: "12px 24px",
               borderRadius: 12,
-              background: "#22d3ee",
-              color: "#001018",
+              background: "linear-gradient(90deg, #22d3ee, #3b82f6)",
+              color: "#06121a",
               fontWeight: 700,
               textDecoration: "none",
             }}
           >
-            Health Check
-          </a>
-
-          <a
-            href="https://vercel.com"
-            target="_blank"
-            rel="noreferrer"
-            style={{
-              padding: "12px 18px",
-              borderRadius: 12,
-              border: "1px solid rgba(255,255,255,0.2)",
-              color: "white",
-              textDecoration: "none",
-            }}
-          >
-            Hosted on Vercel
+            🏥 Health Check
           </a>
         </div>
 
-        <p style={{ opacity: 0.6, marginTop: 20, fontSize: 13 }}>
+        <div style={{ marginTop: 48, opacity: 0.5, fontSize: 13 }}>
           © {new Date().getFullYear()} Avatar G
-        </p>
+        </div>
       </div>
     </main>
   );
