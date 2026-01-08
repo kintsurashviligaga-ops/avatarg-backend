@@ -8,8 +8,8 @@ export const runtime = "nodejs";
 const CONFIG = {
   MAX_MESSAGE_LENGTH: 6000,
   OPENAI_TIMEOUT_MS: 28000,
-  RATE_LIMIT_WINDOW_MS: 60_000, // 1 minute
-  RATE_LIMIT_MAX_REQUESTS: 20,  // 20 req/min per IP
+  RATE_LIMIT_WINDOW_MS: 60000, // 1 minute
+  RATE_LIMIT_MAX_REQUESTS: 20, // per IP
   DEBUG: process.env.DEBUG === "true",
 };
 
@@ -23,70 +23,74 @@ function getAllowedOrigins() {
   const env = process.env.FRONTEND_ORIGINS || "";
   const list = env
     .split(",")
-    .map((s) => normalizeUrl(s))
-    .filter(Boolean);
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map(normalizeUrl);
 
-  // safe defaults (შეგიძლია FRONTEND_ORIGINS-ით ჩაანაცვლო)
   const defaults = [
     "https://avatar-g.vercel.app",
     "http://localhost:3000",
     "http://localhost:5173",
   ].map(normalizeUrl);
 
-  return Array.from(new Set([...defaults, ...list]));
+  return Array.from(new Set([...list, ...defaults]));
 }
 
 function isOriginAllowed(origin) {
   if (!origin) return false;
-  const o = normalizeUrl(origin);
-  return getAllowedOrigins().includes(o);
+  const allowed = getAllowedOrigins();
+  return allowed.includes(normalizeUrl(origin));
 }
 
-function corsHeaders(req, allow = true) {
+function corsHeaders(req, allowOrigin = true) {
   const origin = req.headers.get("origin") || "";
-  if (!allow || !origin || !isOriginAllowed(origin)) {
-    // no CORS headers when blocked (safer)
+
+  // If no origin (server-to-server / curl), just return JSON header.
+  if (!origin) {
     return { "Content-Type": "application/json" };
   }
+
+  // If origin present, enforce allowlist.
+  if (!allowOrigin || !isOriginAllowed(origin)) {
+    return { "Content-Type": "application/json" };
+  }
+
   return {
+    "Content-Type": "application/json",
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "POST, OPTIONS, GET",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Max-Age": "86400",
     "Vary": "Origin",
-    "Content-Type": "application/json",
   };
 }
 
 // ==================== RATE LIMIT (IN-MEMORY) ====================
-// Note: Serverless-ზე შეიძლება reset-დებოდეს deploy/instance-ზე — მაგრამ პრაქტიკულად მუშაობს.
 
 const rateLimitStore = new Map();
 
 function cleanupRateLimit() {
   const now = Date.now();
-  for (const [k, v] of rateLimitStore.entries()) {
-    if (now - v.windowStart > CONFIG.RATE_LIMIT_WINDOW_MS * 2) {
-      rateLimitStore.delete(k);
+  for (const [key, rec] of rateLimitStore.entries()) {
+    if (now - rec.windowStart > CONFIG.RATE_LIMIT_WINDOW_MS * 2) {
+      rateLimitStore.delete(key);
     }
   }
 }
 
 function getClientIdentifier(req) {
-  // Vercel: x-forwarded-for ხშირად ყველაზე სწორი
-  const xff = req.headers.get("x-forwarded-for");
-  if (xff) return xff.split(",")[0].trim();
   return (
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     req.headers.get("x-real-ip") ||
     req.headers.get("cf-connecting-ip") ||
     "unknown"
   );
 }
 
-function checkRateLimit(id) {
+function checkRateLimit(identifier) {
   cleanupRateLimit();
   const now = Date.now();
-  const key = `ip:${id}`;
+  const key = `ip:${identifier}`;
 
   let rec = rateLimitStore.get(key);
   if (!rec || now - rec.windowStart > CONFIG.RATE_LIMIT_WINDOW_MS) {
@@ -96,22 +100,24 @@ function checkRateLimit(id) {
 
   rec.count += 1;
 
-  const remaining = Math.max(0, CONFIG.RATE_LIMIT_MAX_REQUESTS - rec.count);
   if (rec.count > CONFIG.RATE_LIMIT_MAX_REQUESTS) {
-    const resetInMs = CONFIG.RATE_LIMIT_WINDOW_MS - (now - rec.windowStart);
-    const resetIn = Math.max(1, Math.ceil(resetInMs / 1000));
-    return { allowed: false, remaining: 0, resetIn, limit: CONFIG.RATE_LIMIT_MAX_REQUESTS };
+    const resetIn = Math.ceil(
+      (CONFIG.RATE_LIMIT_WINDOW_MS - (now - rec.windowStart)) / 1000
+    );
+    return { allowed: false, resetIn, limit: CONFIG.RATE_LIMIT_MAX_REQUESTS };
   }
 
-  const resetInMs = CONFIG.RATE_LIMIT_WINDOW_MS - (now - rec.windowStart);
-  const resetIn = Math.max(1, Math.ceil(resetInMs / 1000));
-  return { allowed: true, remaining, resetIn, limit: CONFIG.RATE_LIMIT_MAX_REQUESTS };
+  return {
+    allowed: true,
+    remaining: CONFIG.RATE_LIMIT_MAX_REQUESTS - rec.count,
+    limit: CONFIG.RATE_LIMIT_MAX_REQUESTS,
+  };
 }
 
-// ==================== HELPERS ====================
+// ==================== UTILITIES ====================
 
 function debugLog(...args) {
-  if (CONFIG.DEBUG) console.log("[/api/ai]", ...args);
+  if (CONFIG.DEBUG) console.log("[AI Route]", ...args);
 }
 
 function safeJsonParse(text) {
@@ -124,62 +130,108 @@ function safeJsonParse(text) {
 
 function sanitizeInput(input) {
   if (typeof input !== "string") return "";
-  let s = input.replace(/\0/g, "").replace(/\s+/g, " ").trim();
-  if (s.length > CONFIG.MAX_MESSAGE_LENGTH) s = s.slice(0, CONFIG.MAX_MESSAGE_LENGTH);
-  return s;
+  let cleaned = input.replace(/\0/g, "").replace(/\s+/g, " ").trim();
+  if (cleaned.length > CONFIG.MAX_MESSAGE_LENGTH) {
+    cleaned = cleaned.slice(0, CONFIG.MAX_MESSAGE_LENGTH);
+  }
+  return cleaned;
 }
 
 function normalizeMessages(body) {
-  // Priority: messages[] if exists, else message/prompt/text
-  const rawMessages = Array.isArray(body?.messages) ? body.messages : null;
-
-  if (rawMessages && rawMessages.length) {
-    const cleaned = rawMessages
-      .map((m) => {
-        const role = m?.role;
-        const allowedRole =
-          role === "system" || role === "assistant" || role === "user" ? role : "user";
-        return {
-          role: allowedRole,
-          content: sanitizeInput(String(m?.content ?? "")),
-        };
-      })
-      .filter((m) => m.content);
-
-    // თუ frontend-მა message-საც გამოგზავნა, ნუ დავადუბლირებთ:
-    return cleaned;
-  }
-
   const single =
     body?.message ||
     body?.prompt ||
     body?.text ||
     "";
 
-  const msg = sanitizeInput(String(single));
-  if (msg) return [{ role: "user", content: msg }];
+  if (Array.isArray(body?.messages) && body.messages.length) {
+    return body.messages
+      .map((m) => ({
+        role: (m?.role === "assistant" || m?.role === "system") ? m.role : "user",
+        content: sanitizeInput(String(m?.content ?? "")),
+      }))
+      .filter((m) => m.content);
+  }
+
+  if (single) {
+    return [{ role: "user", content: sanitizeInput(String(single)) }];
+  }
+
   return [];
 }
 
-function buildSystemPrompt() {
+// ==================== LANGUAGE CONTROL (FIX) ====================
+
+// Detect Georgian vs English vs Russian based on last user message.
+function detectLangFromText(text) {
+  const t = String(text || "");
+  const hasKa = /[\u10A0-\u10FF]/.test(t); // Georgian
+  const hasRu = /[\u0400-\u04FF]/.test(t); // Cyrillic
+  const hasEn = /[A-Za-z]/.test(t);
+
+  if (hasKa) return "ka";
+  if (hasRu) return "ru";
+  if (hasEn) return "en";
+  return "ka"; // default to Georgian
+}
+
+function getLastUserMessage(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "user" && messages[i]?.content) {
+      return messages[i].content;
+    }
+  }
+  return "";
+}
+
+// Hard guard: if user is Georgian, forbid Cyrillic/Latin in final text.
+function violatesLangPolicy(text, lang) {
+  const s = String(text || "");
+  if (lang === "ka") {
+    // Allow digits/punctuation/emoji, but forbid Cyrillic + Latin letters.
+    if (/[\u0400-\u04FF]/.test(s)) return true; // Cyrillic
+    if (/[A-Za-z]/.test(s)) return true; // Latin
+  }
+  if (lang === "ru") {
+    // For RU forbid Georgian letters (optional strictness).
+    if (/[\u10A0-\u10FF]/.test(s)) return true;
+  }
+  // For EN we keep loose (it can contain names etc.)
+  return false;
+}
+
+function buildSystemPrompt(lang) {
+  if (lang === "ka") {
+    return (
+      "You are Avatar G — a professional AI assistant for the Avatar G Workspace. " +
+      "IMPORTANT: Respond ONLY in Georgian (ქართული). Do NOT use Russian or English. " +
+      "Keep answers concise, helpful, and professional. " +
+      "If you must use a brand name or URL, keep it minimal."
+    );
+  }
+  if (lang === "ru") {
+    return (
+      "You are Avatar G — a professional AI assistant for the Avatar G Workspace. " +
+      "Respond ONLY in Russian. Keep answers concise and professional."
+    );
+  }
   return (
     "You are Avatar G — a professional AI assistant for the Avatar G Workspace. " +
-    "Provide clear, helpful, actionable responses. " +
-    "If the user writes in Georgian (ქართული), respond in Georgian. " +
-    "Keep answers concise and professional."
+    "Respond ONLY in English. Keep answers concise and professional."
   );
 }
 
-// ==================== OPENAI (Chat Completions) ====================
+// ==================== OPENAI CALL ====================
 
-async function callOpenAI(messages) {
+async function callOpenAI(messages, lang) {
   const apiKey = process.env.OPENAI_API_KEY;
+
   if (!apiKey) {
     return {
       ok: false,
-      statusCode: 500,
       error: "Configuration Error",
-      hint: "OPENAI_API_KEY is missing in Vercel environment variables. Add it and redeploy.",
+      hint: "OPENAI_API_KEY is missing. Add it to Vercel environment variables and redeploy.",
+      statusCode: 500,
     };
   }
 
@@ -187,17 +239,21 @@ async function callOpenAI(messages) {
 
   const payload = {
     model,
-    messages: [{ role: "system", content: buildSystemPrompt() }, ...messages],
+    messages: [
+      { role: "system", content: buildSystemPrompt(lang) },
+      ...messages,
+    ],
     temperature: 0.7,
     max_tokens: 2000,
   };
 
+  debugLog("OpenAI Request:", { model, lang, messageCount: messages.length });
+
   const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), CONFIG.OPENAI_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), CONFIG.OPENAI_TIMEOUT_MS);
+  const start = Date.now();
 
   try {
-    debugLog("OpenAI request:", { model, count: messages.length });
-
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -207,6 +263,11 @@ async function callOpenAI(messages) {
       body: JSON.stringify(payload),
       signal: controller.signal,
     });
+
+    clearTimeout(timeoutId);
+
+    const elapsed = Date.now() - start;
+    debugLog("OpenAI Response:", { status: res.status, elapsed: `${elapsed}ms` });
 
     const data = await res.json().catch(() => ({}));
 
@@ -218,51 +279,87 @@ async function callOpenAI(messages) {
 
       return {
         ok: false,
-        statusCode: res.status,
         error: msg,
+        statusCode: res.status,
         hint:
           res.status === 401
-            ? "Invalid OPENAI_API_KEY. Check Vercel env and redeploy."
+            ? "Invalid OPENAI_API_KEY. Check your API key in Vercel environment variables."
             : res.status === 429
-            ? "OpenAI rate limit exceeded. Wait or upgrade plan."
-            : "OpenAI request failed. Check Vercel logs for details.",
+            ? "OpenAI rate limit exceeded. Wait and retry or upgrade your plan."
+            : "OpenAI API request failed. Check logs for details.",
       };
     }
 
-    const text = data?.choices?.[0]?.message?.content || "";
+    const text =
+      data?.choices?.[0]?.message?.content ||
+      data?.choices?.[0]?.text ||
+      "";
+
     return {
       ok: true,
       text: text || "(empty response)",
-      model: data?.model || model,
+      model: data?.model,
       usage: data?.usage,
     };
   } catch (e) {
+    clearTimeout(timeoutId);
+
     if (e?.name === "AbortError") {
       return {
         ok: false,
-        statusCode: 504,
         error: "Request Timeout",
-        hint: `OpenAI request exceeded ${Math.round(CONFIG.OPENAI_TIMEOUT_MS / 1000)}s. Try shorter input.`,
+        statusCode: 504,
+        hint: `OpenAI request exceeded ${CONFIG.OPENAI_TIMEOUT_MS / 1000}s timeout. Try shorter message or retry.`,
       };
     }
+
     return {
       ok: false,
-      statusCode: 502,
       error: "Network Error",
-      hint: "Failed to connect to OpenAI API. Check network / OpenAI status.",
+      statusCode: 502,
+      hint: "Failed to connect to OpenAI API. Check network and API status.",
     };
-  } finally {
-    clearTimeout(t);
   }
 }
 
-// ==================== ROUTE HANDLERS ====================
+// Second pass fix if language got mixed.
+async function enforceLanguageIfNeeded(originalText, messages, lang) {
+  if (!violatesLangPolicy(originalText, lang)) return originalText;
+
+  const fixerSystem =
+    lang === "ka"
+      ? "Rewrite the following text into PURE Georgian only. Remove any Russian/English words completely. Keep meaning. Output only Georgian."
+      : lang === "ru"
+      ? "Rewrite the following text into PURE Russian only. Remove any Georgian/English words completely. Keep meaning. Output only Russian."
+      : "Rewrite the following text into PURE English only. Remove any Georgian/Russian words completely. Keep meaning. Output only English.";
+
+  const fixMessages = [
+    { role: "system", content: fixerSystem },
+    { role: "user", content: originalText },
+  ];
+
+  const fixed = await callOpenAI(fixMessages, lang);
+  if (fixed.ok && fixed.text && !violatesLangPolicy(fixed.text, lang)) {
+    return fixed.text;
+  }
+
+  // Fallback: if still bad, return a safe short message.
+  if (lang === "ka") {
+    return "ბოდიში, მოხდა ტექნიკური ხარვეზი. გთხოვ, თავიდან მომწერე და მხოლოდ ქართულად გიპასუხებ.";
+  }
+  if (lang === "ru") {
+    return "Извините, произошла техническая ошибка. Напишите ещё раз — отвечу только по-русски.";
+  }
+  return "Sorry, a technical issue occurred. Please try again — I will reply only in English.";
+}
+
+// ==================== HANDLERS ====================
 
 export async function OPTIONS(req) {
   const origin = req.headers.get("origin") || "";
 
   if (origin && !isOriginAllowed(origin)) {
-    debugLog("CORS preflight rejected:", origin);
+    debugLog("CORS Preflight Rejected:", origin);
     return new NextResponse(null, {
       status: 403,
       headers: { "Content-Type": "text/plain" },
@@ -276,7 +373,6 @@ export async function OPTIONS(req) {
 }
 
 export async function GET(req) {
-  // allow GET health/info
   return NextResponse.json(
     {
       status: "ok",
@@ -289,104 +385,113 @@ export async function GET(req) {
 }
 
 export async function POST(req) {
+  const startTime = Date.now();
   const origin = req.headers.get("origin") || "";
 
-  // 1) CORS block
+  // 1) CORS check
   if (origin && !isOriginAllowed(origin)) {
-    debugLog("CORS rejected:", origin);
+    debugLog("CORS Rejected:", origin);
     return NextResponse.json(
       {
         error: "Origin Not Allowed",
-        hint: "Your domain is not in FRONTEND_ORIGINS allowlist.",
+        hint: "Your domain is not in the FRONTEND_ORIGINS allowlist.",
       },
       { status: 403, headers: corsHeaders(req, false) }
     );
   }
 
-  const baseHeaders = corsHeaders(req, true);
+  const headers = corsHeaders(req, true);
 
   // 2) Rate limit
   const clientId = getClientIdentifier(req);
   const rl = checkRateLimit(clientId);
-
-  const rateHeaders = {
-    ...baseHeaders,
-    "X-RateLimit-Limit": String(rl.limit),
-    "X-RateLimit-Remaining": String(rl.remaining),
-    "X-RateLimit-Reset": String(rl.resetIn),
-  };
-
   if (!rl.allowed) {
+    debugLog("Rate Limit Exceeded:", clientId);
     return NextResponse.json(
       {
         error: "Rate Limit Exceeded",
-        hint: `Max ${rl.limit} requests per minute. Try again in ${rl.resetIn}s.`,
+        hint: `Max ${rl.limit} requests/min. Try again in ${rl.resetIn}s.`,
         retryAfter: rl.resetIn,
       },
       {
         status: 429,
-        headers: {
-          ...rateHeaders,
-          "Retry-After": String(rl.resetIn),
-        },
+        headers: { ...headers, "Retry-After": String(rl.resetIn) },
       }
     );
   }
 
-  // 3) Parse JSON safely
-  const raw = await req.text().catch(() => "");
-  const body = safeJsonParse(raw);
+  try {
+    // 3) Parse body
+    const rawText = await req.text().catch(() => "");
+    const body = safeJsonParse(rawText);
 
-  if (!body || typeof body !== "object") {
+    if (!body || typeof body !== "object") {
+      return NextResponse.json(
+        { error: "Invalid JSON", hint: "Send JSON like { message: '...' }" },
+        { status: 400, headers }
+      );
+    }
+
+    // 4) Normalize messages
+    const messages = normalizeMessages(body);
+
+    if (!messages.length) {
+      return NextResponse.json(
+        {
+          error: "No Message Found",
+          hint: "Send { message: '...' } or { messages: [{role:'user', content:'...'}] }",
+          receivedKeys: Object.keys(body),
+        },
+        { status: 400, headers }
+      );
+    }
+
+    // 5) Detect language from last user input
+    const lastUser = getLastUserMessage(messages) || "";
+    const lang = detectLangFromText(lastUser);
+
+    // 6) Call OpenAI
+    const ai = await callOpenAI(messages, lang);
+
+    if (!ai.ok) {
+      return NextResponse.json(
+        {
+          error: ai.error || "AI Request Failed",
+          hint: ai.hint || "Unknown error occurred.",
+          statusCode: ai.statusCode,
+        },
+        { status: ai.statusCode || 500, headers }
+      );
+    }
+
+    // 7) Enforce language strictly (fix mixed output)
+    const finalText = await enforceLanguageIfNeeded(ai.text, messages, lang);
+
+    const elapsed = Date.now() - startTime;
+
     return NextResponse.json(
       {
-        error: "Invalid JSON",
-        hint: "Body must be valid JSON. Example: { message: 'გამარჯობა' }",
+        reply: finalText,
+        meta: {
+          model: ai.model,
+          lang,
+          processingTime: `${elapsed}ms`,
+          ...(CONFIG.DEBUG && ai.usage ? { usage: ai.usage } : {}),
+        },
       },
-      { status: 400, headers: rateHeaders }
+      { status: 200, headers }
     );
-  }
+  } catch (e) {
+    const elapsed = Date.now() - startTime;
+    debugLog("Server Error:", e?.message, { elapsed: `${elapsed}ms` });
 
-  // 4) Normalize messages
-  const messages = normalizeMessages(body);
-  if (!messages.length) {
+    const errorMessage = CONFIG.DEBUG
+      ? e?.message || "Unknown error"
+      : "Internal Server Error";
+
     return NextResponse.json(
-      {
-        error: "No Message Found",
-        hint: "Send { message: '...' } or { messages: [{role:'user', content:'...'}] }",
-        receivedKeys: Object.keys(body),
-      },
-      { status: 400, headers: rateHeaders }
+      { error: errorMessage, hint: "Unexpected error. Please retry." },
+      { status: 500, headers }
     );
   }
-
-  // 5) Call OpenAI
-  const start = Date.now();
-  const ai = await callOpenAI(messages);
-
-  if (!ai.ok) {
-    return NextResponse.json(
-      {
-        error: ai.error || "AI Request Failed",
-        hint: ai.hint || "Unknown error.",
-        statusCode: ai.statusCode,
-      },
-      { status: ai.statusCode || 500, headers: rateHeaders }
-    );
-  }
-
-  const elapsed = Date.now() - start;
-
-  // 6) Success response (frontend expects reply)
-  return NextResponse.json(
-    {
-      reply: ai.text,
-      meta: {
-        model: ai.model,
-        processingTime: `${elapsed}ms`,
-        ...(CONFIG.DEBUG && ai.usage ? { usage: ai.usage } : {}),
-      },
-    },
-    { status: 200, headers: rateHeaders }
-  );
 }
