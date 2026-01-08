@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { withCORS, corsOPTIONS } from "../_utils/cors";
+import { withCORS, corsOPTIONS } from "../utils/cors";
 
 const CONFIG = {
   MAX_MESSAGE_LENGTH: 6000,
@@ -61,7 +61,7 @@ export async function POST(req) {
     const conversationId = body?.conversation_id || null;
     const mood = body?.mood || "auto";
 
-    // MOCK MODE
+    // ✅ MOCK MODE
     if (!process.env.OPENAI_API_KEY) {
       console.warn("[AI] Running in MOCK mode - OPENAI_API_KEY not set");
       return withCORS(
@@ -111,7 +111,8 @@ export async function POST(req) {
 
       if (!openaiRes.ok) {
         const errorData = await openaiRes.json().catch(() => ({}));
-        const errorMessage = errorData?.error?.message || `HTTP ${openaiRes.status}`;
+        const errorMessage =
+          errorData?.error?.message || `HTTP ${openaiRes.status}`;
 
         return withCORS(
           req,
@@ -197,4 +198,4 @@ export async function POST(req) {
 
 export async function OPTIONS(req) {
   return corsOPTIONS(req);
-                }
+}
