@@ -7,7 +7,9 @@ export async function GET(req) {
     NextResponse.json({
       status: "ok",
       service: "Avatar G Backend",
+      version: "1.0.0",
       time: new Date().toISOString(),
+      env: process.env.NODE_ENV || "unknown",
     })
   );
 }
