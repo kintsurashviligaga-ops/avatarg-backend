@@ -1,0 +1,70 @@
+import { NextResponse } from "next/server";
+
+const ELEVEN_API_KEY = process.env.ELEVENLABS_API_KEY;
+
+export async function POST(req: Request) {
+  try {
+    if (!ELEVEN_API_KEY) {
+      return NextResponse.json(
+        { error: "ElevenLabs API key missing" },
+        { status: 500 }
+      );
+    }
+
+    const body = await req.json();
+    const {
+      prompt,
+      mood = "cinematic",
+      genre = "electronic",
+      duration = 20,
+    } = body;
+
+    if (!prompt) {
+      return NextResponse.json(
+        { error: "Prompt is required" },
+        { status: 400 }
+      );
+    }
+
+    const finalPrompt = `
+Create a ${duration}-second ${genre} instrumental track.
+Mood: ${mood}.
+Style: modern, cinematic, high quality.
+Concept: ${prompt}.
+No vocals unless specified.
+`;
+
+    const response = await fetch(
+      "https://api.elevenlabs.io/v1/music/generate",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "xi-api-key": ELEVEN_API_KEY,
+        },
+        body: JSON.stringify({
+          prompt: finalPrompt,
+          duration_seconds: duration,
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const err = await response.text();
+      return NextResponse.json({ error: err }, { status: 500 });
+    }
+
+    const data = await response.json();
+
+    return NextResponse.json({
+      success: true,
+      audioUrl: data.audio_url,
+      usedPrompt: finalPrompt,
+    });
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: err.message },
+      { status: 500 }
+    );
+  }
+}
