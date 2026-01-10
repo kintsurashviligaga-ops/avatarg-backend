@@ -1,225 +1,279 @@
-// worker/music-worker.js
 import 'dotenv/config'
 import axios from 'axios'
 import { createClient } from '@supabase/supabase-js'
 
-/**
- * REQUIRED ENV:
- * - SUPABASE_URL
- * - SUPABASE_SERVICE_ROLE_KEY
- *
- * MUSIC GENERATION (choose one option):
- * Option A (recommended): Your own API endpoint (server that calls Suno etc.)
- * - MUSIC_API_URL (e.g. https://your-domain.com/api/music/generate)
- * - MUSIC_API_KEY (optional, if your endpoint uses it)
- *
- * Option B: Direct Suno wrapper endpoint (if you have one)
- * - SUNO_API_URL
- * - SUNO_API_KEY
- */
-
 const SUPABASE_URL = process.env.SUPABASE_URL
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  console.error('❌ Missing Supabase env vars.')
-  console.error('SUPABASE_URL:', SUPABASE_URL)
-  console.error('SUPABASE_SERVICE_ROLE_KEY exists:', !!SUPABASE_SERVICE_ROLE_KEY)
+const MUSIC_BUCKET = process.env.MUSIC_BUCKET || 'music'
+const RPC_CLAIM_FN = process.env.RPC_CLAIM_FN || 'claim_next_music_job'
+const POLL_MS = Number(process.env.POLL_MS || 3000)
+const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 60000)
+const RETRIES = Number(process.env.RETRIES || 2)
+const STALE_PROCESSING_MINUTES = Number(process.env.STALE_PROCESSING_MINUTES || 15)
+const JOB_HARD_TIMEOUT_MS = Number(process.env.JOB_HARD_TIMEOUT_MS || 180000)
+
+const WRITE_OUTPUT_COLUMNS = (process.env.WRITE_OUTPUT_COLUMNS || 'false').toLowerCase() === 'true'
+const OUTPUT_PATH_COLUMN = process.env.OUTPUT_PATH_COLUMN || 'audio_path'
+const OUTPUT_URL_COLUMN = process.env.OUTPUT_URL_COLUMN || 'audio_url'
+
+if (!SUPABASE_URL) {
+  console.error('❌ FATAL: Missing SUPABASE_URL')
+  process.exit(1)
+}
+if (!SUPABASE_SERVICE_ROLE_KEY) {
+  console.error('❌ FATAL: Missing SUPABASE_SERVICE_ROLE_KEY')
+  process.exit(1)
+}
+if (!ELEVENLABS_API_KEY) {
+  console.error('❌ FATAL: Missing ELEVENLABS_API_KEY')
   process.exit(1)
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-  auth: { persistSession: false },
+  auth: { persistSession: false }
 })
 
-const POLL_MS = Number(process.env.MUSIC_WORKER_POLL_MS || 3000)
-const REQUEST_TIMEOUT_MS = Number(process.env.MUSIC_REQUEST_TIMEOUT_MS || 120000)
+let shuttingDown = false
+process.on('SIGINT', () => {
+  console.log('👋 SIGINT received — graceful shutdown')
+  shuttingDown = true
+})
+process.on('SIGTERM', () => {
+  console.log('👋 SIGTERM received — graceful shutdown')
+  shuttingDown = true
+})
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+function nowIso() {
+  return new Date().toISOString()
 }
 
-function safeStringify(x) {
+function truncate(str, max = 2000) {
+  if (!str) return str
+  const s = String(str)
+  return s.length > max ? s.slice(0, max) + '...' : s
+}
+
+function safeStatus(err) {
+  return err?.response?.status?.toString?.() || null
+}
+
+function safeErrMessage(err) {
   try {
-    return JSON.stringify(x)
-  } catch {
-    return String(x)
+    if (err?.response?.data) {
+      const raw = JSON.stringify(err.response.data)
+      return truncate(raw, 1800)
+    }
+  } catch (_) {}
+  return truncate(err?.message || String(err), 1800)
+}
+
+async function updateJobSafe(id, patch) {
+  const { error } = await supabase.from('music_jobs').update(patch).eq('id', id)
+  if (!error) return
+
+  const minimal = {}
+  if ('status' in patch) minimal.status = patch.status
+  if ('error_code' in patch) minimal.error_code = patch.error_code
+  if ('error_message' in patch) minimal.error_message = patch.error_message
+  if ('error_at' in patch) minimal.error_at = patch.error_at
+  if ('started_at' in patch) minimal.started_at = patch.started_at
+  if ('completed_at' in patch) minimal.completed_at = patch.completed_at
+
+  const { error: error2 } = await supabase.from('music_jobs').update(minimal).eq('id', id)
+  if (error2) {
+    console.error('❌ DB UPDATE FAILED (fallback):', error2.message)
+  } else {
+    console.log('🟠 DB UPDATE fallback used')
   }
 }
 
-/**
- * Calls your music generation endpoint.
- * Must return:
- *  - { url: "https://..." }  OR
- *  - { audio_url: "https://..." } OR
- *  - any JSON you want to store in result_json
- */
-async function generateMusic({ prompt, duration_sec, job_id }) {
-  const apiUrl = process.env.MUSIC_API_URL || process.env.SUNO_API_URL
-  if (!apiUrl) {
-    throw new Error(
-      'MUSIC_API_URL (or SUNO_API_URL) is missing. Set it in .env'
-    )
+async function claimNextJob() {
+  const { data, error } = await supabase.rpc(RPC_CLAIM_FN)
+  if (error) throw error
+  if (!data) return null
+  if (Array.isArray(data)) return data[0] || null
+  return data
+}
+
+async function elevenLabsGenerateAudio(prompt) {
+  const url = 'https://api.elevenlabs.io/v1/sound-generation'
+  const res = await axios.post(
+    url,
+    { text: prompt },
+    {
+      headers: {
+        'xi-api-key': ELEVENLABS_API_KEY,
+        'Content-Type': 'application/json',
+        Accept: 'audio/mpeg'
+      },
+      timeout: REQUEST_TIMEOUT_MS,
+      responseType: 'arraybuffer',
+      validateStatus: () => true
+    }
+  )
+
+  if (res.status >= 400) {
+    const msg = `ElevenLabs error ${res.status}: ${Buffer.from(res.data || '').toString('utf8')}`
+    const e = new Error(msg)
+    e.status = res.status
+    throw e
   }
 
-  const headers = {
-    'Content-Type': 'application/json',
+  return Buffer.from(res.data)
+}
+
+async function uploadToStorage(jobId, audioBuffer) {
+  const objectPath = `jobs/${jobId}.mp3`
+  const { error } = await supabase.storage.from(MUSIC_BUCKET).upload(objectPath, audioBuffer, {
+    contentType: 'audio/mpeg',
+    upsert: true
+  })
+  if (error) throw error
+
+  const { data } = supabase.storage.from(MUSIC_BUCKET).getPublicUrl(objectPath)
+  const publicUrl = data?.publicUrl || null
+
+  return { objectPath, publicUrl }
+}
+
+async function withRetries(fn, retries = RETRIES) {
+  let lastErr = null
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn(attempt)
+    } catch (err) {
+      lastErr = err
+      const isLast = attempt === retries
+      console.error(`❌ Attempt ${attempt + 1}/${retries + 1} failed:`, safeErrMessage(err))
+      if (isLast) break
+      await sleep(800 * (attempt + 1))
+    }
   }
+  throw lastErr
+}
 
-  // optional auth header
-  const apiKey = process.env.MUSIC_API_KEY || process.env.SUNO_API_KEY
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`
-
-  const payload = {
-    prompt,
-    duration_sec,
-    job_id,
-  }
-
-  const res = await axios.post(apiUrl, payload, {
-    headers,
-    timeout: REQUEST_TIMEOUT_MS,
-    validateStatus: () => true, // we handle status manually
+async function processJobWithTimeout(job) {
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('Job hard timeout exceeded')), JOB_HARD_TIMEOUT_MS)
   })
 
-  if (res.status < 200 || res.status >= 300) {
-    const msg =
-      res.data?.error ||
-      res.data?.message ||
-      `Music API failed with status ${res.status}`
-    const err = new Error(msg)
-    err.response = { status: res.status, data: res.data }
-    throw err
-  }
-
-  return res.data
+  return Promise.race([processJob(job), timeoutPromise])
 }
 
-async function markError(jobId, err) {
-  const code = err?.response?.status ? String(err.response.status) : null
-  const message =
-    err?.response?.data
-      ? safeStringify(err.response.data)
-      : err?.message
-        ? String(err.message)
-        : safeStringify(err)
+async function processJob(job) {
+  console.log('============================================================')
+  console.log('🟡 JOB CLAIMED:', job.id)
+  console.log('🟡 PROMPT:', job.prompt)
+  console.log('🟡 STARTED_AT:', job.started_at)
+  console.log('============================================================')
 
-  const update = {
-    status: 'error',
-    error_code: code,
-    error_message: message,
-    error_at: new Date().toISOString(),
-  }
+  try {
+    const trimmed = String(job.prompt || '').trim()
+    if (trimmed.length < 3) {
+      throw new Error('Prompt too short or empty')
+    }
 
-  const { error: upErr } = await supabase
-    .from('music_jobs')
-    .update(update)
-    .eq('id', jobId)
+    console.log('🟡 Calling ElevenLabs Sound Generation...')
+    const audioBuffer = await withRetries(async () => {
+      const buf = await elevenLabsGenerateAudio(trimmed)
+      if (!buf || buf.length < 1000) {
+        throw new Error(`Audio buffer too small: ${buf?.length} bytes`)
+      }
+      return buf
+    })
 
-  if (upErr) {
-    console.error('❌ Failed to write error into DB:', upErr)
-  }
-}
+    console.log('🟢 Audio generated:', audioBuffer.length, 'bytes')
 
-async function markDone(jobId, result) {
-  // If you have columns like result_url/result_json, use them.
-  // If not, keep only status.
-  const resultUrl =
-    result?.url || result?.audio_url || result?.audioUrl || null
+    console.log('🟡 Uploading to Supabase Storage...')
+    const { objectPath, publicUrl } = await uploadToStorage(job.id, audioBuffer)
+    console.log('🟢 Upload success:', objectPath)
+    console.log('🟢 Public URL:', publicUrl)
 
-  const update = {
-    status: 'done',
-    // Uncomment ONLY if these columns exist in your table:
-    // result_url: resultUrl,
-    // result_json: result,
-    done_at: new Date().toISOString(),
-  }
+    const patch = {
+      status: 'complete',
+      error_code: null,
+      error_message: null,
+      error_at: null,
+      completed_at: nowIso()
+    }
 
-  // If you DO have result_url column, safely set it:
-  if (resultUrl) update.result_url = resultUrl
-  // If you DO have result_json column, safely set it:
-  update.result_json = result
+    if (WRITE_OUTPUT_COLUMNS) {
+      patch[OUTPUT_PATH_COLUMN] = objectPath
+      patch[OUTPUT_URL_COLUMN] = publicUrl
+    }
 
-  const { error: upErr } = await supabase
-    .from('music_jobs')
-    .update(update)
-    .eq('id', jobId)
+    await updateJobSafe(job.id, patch)
+    console.log('✅ JOB COMPLETED:', job.id)
+  } catch (err) {
+    console.error('❌ JOB FAILED:', job.id)
+    console.error('Error:', safeErrMessage(err))
 
-  if (upErr) {
-    console.error('❌ Failed to mark done in DB:', upErr)
+    await updateJobSafe(job.id, {
+      status: 'error',
+      error_code: safeStatus(err) || 'UNKNOWN',
+      error_message: safeErrMessage(err),
+      error_at: nowIso()
+    })
   }
 }
 
-async function runWorker() {
-  console.log('🎵 MUSIC WORKER STARTED')
-  console.log('Poll ms:', POLL_MS)
-  console.log('API URL:', process.env.MUSIC_API_URL || process.env.SUNO_API_URL)
+async function failStaleJobs() {
+  try {
+    const { data, error } = await supabase.rpc('fail_stale_music_jobs', {
+      stale_minutes: STALE_PROCESSING_MINUTES
+    })
+    if (error) throw error
+    if (data > 0) {
+      console.log(`🟠 Recovered ${data} stale job(s)`)
+    }
+  } catch (err) {
+    console.error('❌ Stale job recovery error:', safeErrMessage(err))
+  }
+}
 
-  while (true) {
+async function main() {
+  console.log('✅ ENV validated')
+  console.log('🎵 MUSIC WORKER — PRODUCTION')
+  console.log('Table: music_jobs')
+  console.log('Bucket:', MUSIC_BUCKET)
+  console.log('RPC:', RPC_CLAIM_FN)
+  console.log('Poll interval:', POLL_MS, 'ms')
+  console.log('Request timeout:', REQUEST_TIMEOUT_MS, 'ms')
+  console.log('Job hard timeout:', JOB_HARD_TIMEOUT_MS, 'ms')
+  console.log('Retries:', RETRIES)
+  console.log('Stale processing threshold:', STALE_PROCESSING_MINUTES, 'min')
+  console.log('Write output columns:', WRITE_OUTPUT_COLUMNS)
+  console.log('------------------------------------------------------------')
+
+  let lastStaleCheck = Date.now()
+  const STALE_CHECK_INTERVAL_MS = 60000
+
+  while (!shuttingDown) {
     try {
-      // 1) claim job via RPC
-      const { data: jobs, error: rpcError } = await supabase.rpc(
-        'claim_next_music_job'
-      )
+      if (Date.now() - lastStaleCheck > STALE_CHECK_INTERVAL_MS) {
+        await failStaleJobs()
+        lastStaleCheck = Date.now()
+      }
 
-      if (rpcError) {
-        console.error('❌ RPC ERROR:', rpcError)
+      const job = await claimNextJob()
+      if (!job) {
         await sleep(POLL_MS)
         continue
       }
 
-      if (!jobs || jobs.length === 0) {
-        // no jobs
-        await sleep(POLL_MS)
-        continue
-      }
-
-      const job = jobs[0]
-      const jobId = job.id
-      const prompt = job.prompt
-      const durationSec = job.duration_sec ?? 30
-
-      console.log(`✅ Claimed job: ${jobId}`)
-      console.log('Prompt:', prompt)
-      console.log('Duration:', durationSec)
-
-      // 2) Generate music
-      const result = await generateMusic({
-        prompt,
-        duration_sec: durationSec,
-        job_id: jobId,
-      })
-
-      console.log(`✅ Generated music for job ${jobId}`)
-      console.log('Result:', result)
-
-      // 3) Mark done
-      await markDone(jobId, result)
+      await processJobWithTimeout(job)
     } catch (err) {
-      console.error('❌ MUSIC GENERATION ERROR')
-      console.error('err:', err)
-      console.error('err.message:', err?.message)
-      console.error('err.response?.status:', err?.response?.status)
-      console.error('err.response?.data:', err?.response?.data)
-
-      // If we can detect job id from context, great — but we only have it if job was claimed.
-      // So we try to read it from err.jobId if you ever attach it.
-      const jobId = err?.jobId
-
-      if (jobId) {
-        await markError(jobId, err)
-      } else {
-        console.error(
-          '⚠️ No jobId available in catch. If crash happens before job is set, DB cannot be updated.'
-        )
-      }
-
+      console.error('❌ Worker loop error:', safeErrMessage(err))
       await sleep(POLL_MS)
     }
   }
+
+  console.log('👋 Worker stopped gracefully')
+  process.exit(0)
 }
 
-runWorker().catch((e) => {
-  console.error('❌ FATAL WORKER ERROR:', e)
-  process.exit(1)
-})
+main()
