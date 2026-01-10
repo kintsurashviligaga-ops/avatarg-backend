@@ -2,6 +2,26 @@ import 'dotenv/config'
 import axios from 'axios'
 import { createClient } from '@supabase/supabase-js'
 
+/**
+ * REQUIRED ENV:
+ * - SUPABASE_URL
+ * - SUPABASE_SERVICE_ROLE_KEY
+ * - ELEVENLABS_API_KEY
+ *
+ * OPTIONAL ENV:
+ * - MUSIC_BUCKET (default: "music")
+ * - RPC_CLAIM_FN (default: "claim_next_music_job")
+ * - POLL_MS (default: 3000)
+ * - REQUEST_TIMEOUT_MS (default: 60000)
+ * - RETRIES (default: 2)
+ * - STALE_PROCESSING_MINUTES (default: 15)
+ * - JOB_HARD_TIMEOUT_MS (default: 180000)
+ *
+ * - WRITE_OUTPUT_COLUMNS (default: false)
+ * - OUTPUT_PATH_COLUMN (default: "audio_path")
+ * - OUTPUT_URL_COLUMN (default: "audio_url")
+ */
+
 const SUPABASE_URL = process.env.SUPABASE_URL
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY
@@ -58,7 +78,7 @@ function truncate(str, max = 2000) {
 }
 
 function safeStatus(err) {
-  return err?.response?.status?.toString?.() || null
+  return err?.response?.status?.toString?.() || err?.status?.toString?.() || null
 }
 
 function safeErrMessage(err) {
@@ -75,13 +95,11 @@ async function updateJobSafe(id, patch) {
   const { error } = await supabase.from('music_jobs').update(patch).eq('id', id)
   if (!error) return
 
+  // fallback minimal update (in case some columns don't exist yet)
   const minimal = {}
-  if ('status' in patch) minimal.status = patch.status
-  if ('error_code' in patch) minimal.error_code = patch.error_code
-  if ('error_message' in patch) minimal.error_message = patch.error_message
-  if ('error_at' in patch) minimal.error_at = patch.error_at
-  if ('started_at' in patch) minimal.started_at = patch.started_at
-  if ('completed_at' in patch) minimal.completed_at = patch.completed_at
+  for (const k of ['status','error_code','error_message','error_at','started_at','completed_at','audio_path','audio_url']) {
+    if (k in patch) minimal[k] = patch[k]
+  }
 
   const { error: error2 } = await supabase.from('music_jobs').update(minimal).eq('id', id)
   if (error2) {
@@ -101,6 +119,7 @@ async function claimNextJob() {
 
 async function elevenLabsGenerateAudio(prompt) {
   const url = 'https://api.elevenlabs.io/v1/sound-generation'
+
   const res = await axios.post(
     url,
     { text: prompt },
@@ -117,7 +136,8 @@ async function elevenLabsGenerateAudio(prompt) {
   )
 
   if (res.status >= 400) {
-    const msg = `ElevenLabs error ${res.status}: ${Buffer.from(res.data || '').toString('utf8')}`
+    const bodyText = Buffer.from(res.data || '').toString('utf8')
+    const msg = `ElevenLabs error ${res.status}: ${truncate(bodyText, 1200)}`
     const e = new Error(msg)
     e.status = res.status
     throw e
@@ -128,6 +148,7 @@ async function elevenLabsGenerateAudio(prompt) {
 
 async function uploadToStorage(jobId, audioBuffer) {
   const objectPath = `jobs/${jobId}.mp3`
+
   const { error } = await supabase.storage.from(MUSIC_BUCKET).upload(objectPath, audioBuffer, {
     contentType: 'audio/mpeg',
     upsert: true
@@ -160,7 +181,6 @@ async function processJobWithTimeout(job) {
   const timeoutPromise = new Promise((_, reject) => {
     setTimeout(() => reject(new Error('Job hard timeout exceeded')), JOB_HARD_TIMEOUT_MS)
   })
-
   return Promise.race([processJob(job), timeoutPromise])
 }
 
@@ -206,6 +226,11 @@ async function processJob(job) {
       patch[OUTPUT_URL_COLUMN] = publicUrl
     }
 
+    // Always try to write audio_url/audio_path too (even if WRITE_OUTPUT_COLUMNS=false)
+    // Safe because updateJobSafe fallback exists
+    patch.audio_path = objectPath
+    patch.audio_url = publicUrl
+
     await updateJobSafe(job.id, patch)
     console.log('✅ JOB COMPLETED:', job.id)
   } catch (err) {
@@ -227,9 +252,7 @@ async function failStaleJobs() {
       stale_minutes: STALE_PROCESSING_MINUTES
     })
     if (error) throw error
-    if (data > 0) {
-      console.log(`🟠 Recovered ${data} stale job(s)`)
-    }
+    if (data > 0) console.log(`🟠 Recovered ${data} stale job(s)`)
   } catch (err) {
     console.error('❌ Stale job recovery error:', safeErrMessage(err))
   }
@@ -250,7 +273,7 @@ async function main() {
   console.log('------------------------------------------------------------')
 
   let lastStaleCheck = Date.now()
-  const STALE_CHECK_INTERVAL_MS = 60000
+  const STALE_CHECK_INTERVAL_MS = 60_000
 
   while (!shuttingDown) {
     try {
