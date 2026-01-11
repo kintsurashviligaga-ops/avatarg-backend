@@ -1,146 +1,312 @@
 /**
- * Avatar G — Music Worker (Production)
+ * Avatar G — Music Worker (Production) — FINAL
  * File: worker/music-worker.js
  *
  * Fixes:
- * - Calls RPC with correct parameter name: { p_worker_id: ... }
- * - Robust logging + retry loop
- * - Safe job state updates
+ * - ALWAYS calls RPC with correct param name: { p_worker_id: ... }
+ * - Never calls claim_next_music_job() without parameters (prevents schema cache error)
+ * - Robust retry loop + jitter
+ * - Safe job state updates (done/error)
  *
  * Required .env:
  * - SUPABASE_URL
  * - SUPABASE_SERVICE_ROLE_KEY
- * - WORKER_ID (optional)
- * - POLL_INTERVAL_MS (optional)
+ * - ELEVENLABS_API_KEY
+ *
+ * Optional .env:
+ * - WORKER_ID
+ * - POLL_INTERVAL_MS (default 3000)
+ * - CLAIM_RETRY_MS (default 10000)
+ * - STALE_RECOVERY_EVERY_LOOPS (default 120)  // every N loops call fail_stale_music_jobs(15)
+ * - STALE_MINUTES (default 15)
+ * - JOB_TIMEOUT_MS (default 600000) // 10 min
  */
 
 import 'dotenv/config';
+import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  console.error('❌ Missing env vars: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
+const WORKER_ID =
+  (process.env.WORKER_ID && String(process.env.WORKER_ID).trim()) ||
+  `music-worker-${process.pid}`;
+
+const POLL_INTERVAL_MS = toInt(process.env.POLL_INTERVAL_MS, 3000);
+const CLAIM_RETRY_MS = toInt(process.env.CLAIM_RETRY_MS, 10000);
+const STALE_RECOVERY_EVERY_LOOPS = toInt(process.env.STALE_RECOVERY_EVERY_LOOPS, 120);
+const STALE_MINUTES = toInt(process.env.STALE_MINUTES, 15);
+const JOB_TIMEOUT_MS = toInt(process.env.JOB_TIMEOUT_MS, 10 * 60 * 1000);
+
+const DB_TABLE = 'music_jobs';
+const BUCKET = 'music';
+
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !ELEVENLABS_API_KEY) {
+  console.error('❌ Missing env vars. Required: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ELEVENLABS_API_KEY');
   process.exit(1);
 }
 
-const WORKER_ID =
-  process.env.WORKER_ID ||
-  `music-worker-${Math.random().toString(16).slice(2)}-${Date.now()}`;
-
-const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 3000);
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
+  global: {
+    headers: {
+      'X-Client-Info': `avatar-g-music-worker/${WORKER_ID}`,
+    },
+  },
 });
+
+function toInt(v, fallback) {
+  const n = Number.parseInt(String(v ?? ''), 10);
+  return Number.isFinite(n) ? n : fallback;
+}
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function markJobError(jobId, err) {
-  const errorCode =
-    err?.code?.toString?.() ||
-    err?.status?.toString?.() ||
-    err?.response?.status?.toString?.() ||
-    null;
-
-  const errorMessage =
-    (err?.response?.data && JSON.stringify(err.response.data)) ||
-    err?.message ||
-    String(err);
-
-  await supabase
-    .from('music_jobs')
-    .update({
-      status: 'error',
-      error_code: errorCode,
-      error_message: errorMessage,
-      error_at: new Date().toISOString(),
-    })
-    .eq('id', jobId);
+function jitter(ms, pct = 0.2) {
+  const delta = ms * pct;
+  const rand = (Math.random() * 2 - 1) * delta;
+  return Math.max(250, Math.floor(ms + rand));
 }
 
-async function completeJob(jobId, audioPath, durationMs) {
-  await supabase
-    .from('music_jobs')
-    .update({
-      status: 'done',
-      audio_bucket: 'music',
-      audio_path: audioPath,
-      completed_at: new Date().toISOString(),
-      processing_duration_ms: durationMs,
-    })
-    .eq('id', jobId);
+function nowIso() {
+  return new Date().toISOString();
 }
 
 /**
- * TODO: აქ ჩასვი შენი რეალური მუსიკის გენერაცია + ატვირთვა storage-ში.
- * ამ ეტაპზე — dummy completion, რომ დავადასტუროთ RPC + flow მუშაობს.
+ * CRITICAL:
+ * This MUST always pass { p_worker_id: WORKER_ID }
+ * Never call RPC without parameters.
  */
-async function generateAndUploadAudio(job) {
-  // მაგ: const audioBuffer = await generateMusicWithSuno(job.prompt)
-  // მერე upload Supabase storage-ში.
-  // ახლა ვაკეთებთ fake path-ს:
-  const fakePath = `jobs/${job.id}.mp3`;
-  return fakePath;
-}
-
 async function claimNextJob() {
-  // ✅ CRITICAL: must pass p_worker_id
   const { data, error } = await supabase.rpc('claim_next_music_job', {
     p_worker_id: WORKER_ID,
   });
 
+  if (error) {
+    return { job: null, error };
+  }
+  const job = Array.isArray(data) && data.length > 0 ? data[0] : null;
+  return { job, error: null };
+}
+
+async function recoverStaleJobs() {
+  // This RPC is service_role only.
+  const { data, error } = await supabase.rpc('fail_stale_music_jobs', {
+    stale_minutes: STALE_MINUTES,
+  });
+
+  if (error) {
+    console.warn('⚠️ fail_stale_music_jobs error:', error.message);
+    return;
+  }
+
+  if (typeof data === 'number' && data > 0) {
+    console.log(`♻️ Recovered stale jobs: ${data}`);
+  }
+}
+
+/**
+ * Generate music via ElevenLabs Sound Generation API.
+ * Returns Buffer (mp3) or throws.
+ */
+async function generateMusic(prompt, timeoutMs) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch('https://api.elevenlabs.io/v1/sound-generation', {
+      method: 'POST',
+      headers: {
+        'xi-api-key': ELEVENLABS_API_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        text: prompt,
+      }),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const txt = await safeReadText(res);
+      const err = new Error(`ElevenLabs API error: ${res.status} ${res.statusText} ${txt ? `— ${txt}` : ''}`);
+      err.status = res.status;
+      err.responseText = txt;
+      throw err;
+    }
+
+    const arrayBuf = await res.arrayBuffer();
+    return Buffer.from(arrayBuf);
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function safeReadText(res) {
+  try {
+    return await res.text();
+  } catch {
+    return '';
+  }
+}
+
+async function uploadAudio(jobId, audioBuf) {
+  const path = `jobs/${jobId}.mp3`;
+
+  const { error: upErr } = await supabase.storage
+    .from(BUCKET)
+    .upload(path, audioBuf, {
+      contentType: 'audio/mpeg',
+      upsert: true,
+      cacheControl: '3600',
+    });
+
+  if (upErr) throw upErr;
+
+  return { bucket: BUCKET, path };
+}
+
+async function markJobDone(jobId, { bucket, path }, durationMs) {
+  const { error } = await supabase
+    .from(DB_TABLE)
+    .update({
+      status: 'done',
+      audio_bucket: bucket,
+      audio_path: path,
+      completed_at: nowIso(),
+      processing_duration_ms: durationMs,
+      error_code: null,
+      error_message: null,
+      error_at: null,
+    })
+    .eq('id', jobId);
+
   if (error) throw error;
+}
 
-  // Supabase returns array for SETOF
-  if (!data || (Array.isArray(data) && data.length === 0)) return null;
+async function markJobError(jobId, err, nextRetrySeconds = 30) {
+  const errorCode =
+    (err && typeof err.status === 'number' && String(err.status)) ||
+    (err && err.code && String(err.code)) ||
+    'WORKER_ERROR';
 
-  return Array.isArray(data) ? data[0] : data;
+  const errorMessage =
+    err?.responseText
+      ? String(err.responseText).slice(0, 5000)
+      : err?.message
+      ? String(err.message).slice(0, 5000)
+      : String(err).slice(0, 5000);
+
+  const nextRetryAt = new Date(Date.now() + nextRetrySeconds * 1000).toISOString();
+
+  // Note: attempts increment is typically done by stale recovery or your own logic.
+  // Here we just re-queue the job with a retry delay.
+  const { error } = await supabase
+    .from(DB_TABLE)
+    .update({
+      status: 'queued',
+      worker_id: null,
+      next_retry_at: nextRetryAt,
+      error_code: errorCode,
+      error_message: errorMessage,
+      error_at: nowIso(),
+    })
+    .eq('id', jobId);
+
+  if (error) throw error;
 }
 
 async function mainLoop() {
-  console.log('========================================');
-  console.log('🎵 Avatar G Music Worker — STARTED');
+  console.log('✅ Config OK');
+  console.log('===============================================');
+  console.log('🎵 MUSIC WORKER — FINAL (Atomic + Prompt-Only)');
+  console.log('===============================================');
+  console.log('DB table:', DB_TABLE);
+  console.log('Bucket:', `${BUCKET}`);
+  console.log('Endpoint:', 'https://api.elevenlabs.io/v1/sound-generation');
+  console.log('Poll:', `${POLL_INTERVAL_MS}ms`);
+  console.log('Timeout:', `${Math.round(JOB_TIMEOUT_MS / 1000)}s`);
+  console.log('RPC:', 'claim_next_music_job(p_worker_id text)');
   console.log('Worker ID:', WORKER_ID);
-  console.log('Poll interval ms:', POLL_INTERVAL_MS);
-  console.log('========================================');
+  console.log('===============================================');
+
+  let loops = 0;
 
   while (true) {
-    try {
-      const job = await claimNextJob();
+    loops += 1;
 
-      if (!job) {
-        await sleep(POLL_INTERVAL_MS);
-        continue;
+    // periodic stale recovery
+    if (STALE_RECOVERY_EVERY_LOOPS > 0 && loops % STALE_RECOVERY_EVERY_LOOPS === 0) {
+      await recoverStaleJobs();
+    }
+
+    const { job, error: claimErr } = await claimNextJob();
+
+    if (claimErr) {
+      // If schema cache still stale, this will show here; keep retrying.
+      console.error(
+        `⚠️ Worker error: Failed to claim job (rpc claim_next_music_job): ${claimErr.message}`
+      );
+      await sleep(jitter(CLAIM_RETRY_MS));
+      continue;
+    }
+
+    if (!job) {
+      await sleep(jitter(POLL_INTERVAL_MS));
+      continue;
+    }
+
+    const jobId = job.id;
+    const prompt = job.prompt;
+
+    const start = Date.now();
+    console.log(`🧾 Claimed job: ${jobId}`);
+
+    try {
+      // Generate audio
+      const audioBuf = await generateMusic(prompt, JOB_TIMEOUT_MS);
+
+      // Upload
+      const uploaded = await uploadAudio(jobId, audioBuf);
+
+      // Mark done
+      const durationMs = Date.now() - start;
+      await markJobDone(jobId, uploaded, durationMs);
+
+      console.log(`✅ Completed job: ${jobId} (${durationMs}ms) → ${uploaded.path}`);
+    } catch (err) {
+      console.error('❌ MUSIC GENERATION ERROR');
+      console.error('err:', err);
+      console.error('err.message:', err?.message);
+      console.error('err.status:', err?.status);
+
+      try {
+        // retry delay: longer for rate limits, shorter otherwise
+        const retrySec = err?.status === 429 ? 90 : 30;
+        await markJobError(jobId, err, retrySec);
+        console.log(`↩️ Re-queued job: ${jobId} (retry in ${retrySec}s)`);
+      } catch (dbErr) {
+        console.error('🔥 Failed to update job status in DB:', dbErr?.message || dbErr);
       }
 
-      const started = Date.now();
-      console.log(`✅ Claimed job: ${job.id}`);
-
-      // Generate audio + upload
-      const audioPath = await generateAndUploadAudio(job);
-
-      const durationMs = Date.now() - started;
-      await completeJob(job.id, audioPath, durationMs);
-
-      console.log(`🎉 Completed job: ${job.id} in ${durationMs}ms`);
-    } catch (err) {
-      // Most common error you had:
-      // "Could not find the function public.claim_next_music_job without parameters"
-      console.error('❌ WORKER LOOP ERROR');
-      console.error(err);
-
-      // Wait a bit then retry loop
-      await sleep(5000);
+      await sleep(jitter(2000));
     }
   }
 }
 
-// Start
+process.on('SIGINT', () => {
+  console.log('👋 SIGINT — shutting down');
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  console.log('👋 SIGTERM — shutting down');
+  process.exit(0);
+});
+
 mainLoop().catch((e) => {
-  console.error('❌ Fatal worker error:', e);
+  console.error('🔥 Fatal worker crash:', e?.message || e);
   process.exit(1);
 });
