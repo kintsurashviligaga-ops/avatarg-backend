@@ -10,22 +10,31 @@ const client = new OpenAI({
 });
 
 // =========================
-// ✅ CORS (set your frontend URL if you want strict)
+// ✅ CORS (recommended: set strict frontend origin)
 // =========================
-// თუ გინდა მხოლოდ შენი front-იდან მიიღოს, Vercel Env-ში ჩაწერე:
+// ✅ Vercel Env-ში რეკომენდებული:
 // NEXT_PUBLIC_FRONTEND_ORIGIN = https://avatar-g.vercel.app
-// ან დატოვე ცარიელი და იმუშავებს "*"-ით
-const ALLOWED_ORIGIN = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "*";
+// თუ დატოვებ ცარიელს -> ავტომატურად იმუშავებს origin-reflect რეჟიმში (safe default)
+const ALLOWED_ORIGIN = (process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "").trim();
 
 function corsHeaders(origin?: string) {
-  const allowOrigin =
-    ALLOWED_ORIGIN === "*" ? "*" : origin && origin === ALLOWED_ORIGIN ? origin : ALLOWED_ORIGIN;
+  const reqOrigin = origin || "";
+  const isStrict = ALLOWED_ORIGIN.length > 0;
+
+  // Strict რეჟიმში მხოლოდ ALLOWED_ORIGIN
+  // Non-strict რეჟიმში origin-reflect (უსაფრთხო და მუშაობს credentials-თანაც)
+  const allowOrigin = isStrict ? ALLOWED_ORIGIN : reqOrigin || "*";
+
+  // NOTE:
+  // Access-Control-Allow-Credentials: true არ შეიძლება "*" origin-თან ერთად.
+  // ამიტომ credentials=true მხოლოდ მაშინ ვრთავთ, როცა კონკრეტული origin გვაქვს.
+  const allowCreds = allowOrigin !== "*" ? "true" : "false";
 
   return {
     "Access-Control-Allow-Origin": allowOrigin,
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Allow-Credentials": allowCreds,
     "Vary": "Origin",
   } as Record<string, string>;
 }
@@ -71,9 +80,12 @@ function normalizeMessages(input: any): Msg[] {
       role: m.role as Role,
       content: String(m.content ?? ""),
     }))
-    .filter((m) => (m.role === "user" || m.role === "assistant") && m.content.trim().length > 0);
+    .filter(
+      (m) =>
+        (m.role === "user" || m.role === "assistant") &&
+        m.content.trim().length > 0
+    );
 
-  // optional: limit history size
   const MAX_HISTORY = 30;
   return cleaned.slice(-MAX_HISTORY);
 }
@@ -85,9 +97,6 @@ export async function POST(req: Request) {
   const origin = req.headers.get("origin") || undefined;
 
   try {
-    const body = await req.json().catch(() => ({}));
-    const messages = normalizeMessages(body?.messages);
-
     if (!process.env.OPENAI_API_KEY) {
       return new Response("Missing OPENAI_API_KEY", {
         status: 500,
@@ -98,18 +107,19 @@ export async function POST(req: Request) {
       });
     }
 
-    // Build final messages with system prompt
+    const body = await req.json().catch(() => ({}));
+    const messages = normalizeMessages(body?.messages);
+
     const finalMessages: Msg[] = [
       { role: "system", content: SYSTEM_PROMPT },
       ...messages,
     ];
 
-    // Create a TransformStream so we can write chunks to the response as they arrive
+    const encoder = new TextEncoder();
     const stream = new TransformStream<Uint8Array, Uint8Array>();
     const writer = stream.writable.getWriter();
-    const encoder = new TextEncoder();
 
-    // Fire-and-forget async streaming
+    // async producer
     (async () => {
       try {
         const completion = await client.chat.completions.create({
@@ -121,16 +131,16 @@ export async function POST(req: Request) {
 
         for await (const chunk of completion) {
           const text = chunk.choices?.[0]?.delta?.content;
-          if (text) {
-            await writer.write(encoder.encode(text));
-          }
+          if (text) await writer.write(encoder.encode(text));
         }
       } catch (e: any) {
-        // write readable error text into stream (still plain text)
-        const msg = e?.message ? `\n\n[Error] ${e.message}` : "\n\n[Error] Unknown error";
+        const msg =
+          e?.message ? `\n\n[Error] ${e.message}` : "\n\n[Error] Unknown error";
         await writer.write(encoder.encode(msg));
       } finally {
-        await writer.close();
+        try {
+          await writer.close();
+        } catch {}
       }
     })();
 
@@ -151,4 +161,4 @@ export async function POST(req: Request) {
       },
     });
   }
-      }
+}
