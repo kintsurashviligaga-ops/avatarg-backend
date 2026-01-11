@@ -15,16 +15,34 @@ export async function POST(req: Request) {
     const { key, contentType } = await req.json();
 
     if (!key || typeof key !== "string") {
-      return NextResponse.json({ error: "Missing 'key' (string)" }, { status: 400 });
+      return NextResponse.json(
+        { error: "Missing key (string)" },
+        { status: 400 }
+      );
     }
 
-    const R2_ENDPOINT = required("R2_ENDPOINT");
-    const R2_ACCESS_KEY_ID = required("R2_ACCESS_KEY_ID");
-    const R2_SECRET_ACCESS_KEY = required("R2_SECRET_ACCESS_KEY");
-    const R2_BUCKET_NAME = required("R2_BUCKET_NAME");
-
-    const s3 = new S3Client({
+    const client = new S3Client({
       region: "auto",
-      endpoint: R2_ENDPOINT,
+      endpoint: required("R2_ENDPOINT"),
       credentials: {
-        accessKeyId: R2_ACCESS_KEY_ID,
+        accessKeyId: required("R2_ACCESS_KEY_ID"),
+        secretAccessKey: required("R2_SECRET_ACCESS_KEY"),
+      },
+    });
+
+    const command = new PutObjectCommand({
+      Bucket: required("R2_BUCKET_NAME"),
+      Key: key,
+      ContentType: contentType || "application/octet-stream",
+    });
+
+    const url = await getSignedUrl(client, command, { expiresIn: 3600 });
+
+    return NextResponse.json({ url });
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: err?.message ?? "Unknown error" },
+      { status: 500 }
+    );
+  }
+}
