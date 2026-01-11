@@ -3,21 +3,22 @@ const nextConfig = {
   async headers() {
     return [
       {
-        // ყველა API route
+        // CORS only for API routes
         source: "/api/:path*",
         headers: [
+          // IMPORTANT: do NOT use "*" if you use Authorization header
           {
             key: "Access-Control-Allow-Origin",
-            value: "*", // თუ გინდა, მერე შეცვლი კონკრეტულ domain-ზე
+            value: process.env.FRONTEND_ORIGIN || "https://cloud.ai",
           },
-          {
-            key: "Access-Control-Allow-Methods",
-            value: "GET,POST,OPTIONS",
-          },
+          { key: "Vary", value: "Origin" },
+
+          { key: "Access-Control-Allow-Methods", value: "GET,POST,PUT,DELETE,OPTIONS" },
           {
             key: "Access-Control-Allow-Headers",
-            value: "Content-Type, Authorization",
+            value: "Content-Type, Authorization, X-Requested-With",
           },
+          { key: "Access-Control-Allow-Credentials", value: "true" },
         ],
       },
     ];
