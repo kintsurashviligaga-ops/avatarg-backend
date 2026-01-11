@@ -1,252 +1,292 @@
 /**
- * Avatar G — Music Worker (Production, SAFE)
- * File: worker/music-worker.js
+ * worker/voice-worker.js
+ * Avatar G — Voice Worker (ElevenLabs TTS) → Supabase Storage → updates voice_jobs
  *
- * Fixes:
- * - Never call ElevenLabs if no job or missing prompt
- * - Correctly parse RPC result (array/object)
- * - Robust retries + safe job state updates
- *
- * Required env:
- * - SUPABASE_URL
- * - SUPABASE_SERVICE_ROLE_KEY
- * - ELEVENLABS_API_KEY
+ * ✅ Requires env:
+ *   SUPABASE_URL
+ *   SUPABASE_SERVICE_ROLE_KEY
+ *   ELEVENLABS_API_KEY
  *
  * Optional env:
- * - WORKER_ID
- * - POLL_INTERVAL_MS (default 3000)
- * - CLAIM_RPC_NAME (default claim_next_music_job)
- * - MUSIC_BUCKET (default music)
+ *   ELEVENLABS_BASE_URL="https://api.elevenlabs.io/v1"
+ *   VOICE_BUCKET="voice"                  (Supabase Storage bucket)
+ *   VOICE_SIGNED_URL_TTL_SECONDS="604800" (7 days)
+ *   POLL_INTERVAL_MS="1500"
+ *   CLAIM_TIMEOUT_MS="90000"
+ *   MAX_RETRIES="3"
+ *
+ * Table expected (minimal):
+ *   voice_jobs: id, status, text, voice_id, model_id, settings(jsonb), audio_url, error, created_at, updated_at
  */
 
-import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
-import crypto from "crypto";
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const CONFIG = {
+  SUPABASE_URL: process.env.SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
 
-const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 3000);
-const CLAIM_RPC_NAME = process.env.CLAIM_RPC_NAME || "claim_next_music_job";
-const MUSIC_BUCKET = process.env.MUSIC_BUCKET || "music";
+  ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
+  ELEVENLABS_BASE_URL: process.env.ELEVENLABS_BASE_URL || "https://api.elevenlabs.io/v1",
 
-const WORKER_ID =
-  process.env.WORKER_ID || `worker-${crypto.randomBytes(4).toString("hex")}`;
+  VOICE_BUCKET: process.env.VOICE_BUCKET || "voice",
+  VOICE_SIGNED_URL_TTL_SECONDS: parseInt(process.env.VOICE_SIGNED_URL_TTL_SECONDS || "604800", 10),
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !ELEVENLABS_API_KEY) {
-  console.error("❌ Missing env vars. Required:");
-  console.error("   SUPABASE_URL");
-  console.error("   SUPABASE_SERVICE_ROLE_KEY");
-  console.error("   ELEVENLABS_API_KEY");
-  process.exit(1);
+  POLL_INTERVAL_MS: parseInt(process.env.POLL_INTERVAL_MS || "1500", 10),
+  CLAIM_TIMEOUT_MS: parseInt(process.env.CLAIM_TIMEOUT_MS || "90000", 10),
+  MAX_RETRIES: parseInt(process.env.MAX_RETRIES || "3", 10),
+};
+
+function requireEnv(name, value) {
+  if (!value) throw new Error(`❌ Missing ${name}`);
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false },
+requireEnv("SUPABASE_URL", CONFIG.SUPABASE_URL);
+requireEnv("SUPABASE_SERVICE_ROLE_KEY", CONFIG.SUPABASE_SERVICE_ROLE_KEY);
+requireEnv("ELEVENLABS_API_KEY", CONFIG.ELEVENLABS_API_KEY);
+
+const supabase = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_SERVICE_ROLE_KEY, {
+  auth: { persistSession: false },
 });
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function pickFirstJob(data) {
-  if (!data) return null;
-  if (Array.isArray(data)) return data.length ? data[0] : null;
-  if (typeof data === "object") return data;
-  return null;
-}
+/**
+ * Calls ElevenLabs TTS and returns MP3 buffer.
+ */
+async function elevenLabsTTS({ text, voice_id, model_id, settings }) {
+  const url = `${CONFIG.ELEVENLABS_BASE_URL}/text-to-speech/${encodeURIComponent(
+    voice_id
+  )}/stream`;
 
-async function markJobError(jobId, code, message) {
-  try {
-    await supabase
-      .from("music_jobs")
-      .update({
-        status: "error",
-        error_code: code ? String(code) : null,
-        error_message: message ? String(message) : "Unknown error",
-        error_at: new Date().toISOString(),
-      })
-      .eq("id", jobId);
-  } catch (e) {
-    console.error("❌ Failed to update job error:", e?.message || e);
-  }
-}
+  // job.settings can override voice_settings, output_format, etc.
+  const voiceSettings = settings?.voice_settings || settings?.voiceSettings || undefined;
+  const outputFormat = settings?.output_format || settings?.outputFormat || "mp3_44100_128";
 
-async function markJobDone(jobId, audioPath) {
-  try {
-    await supabase
-      .from("music_jobs")
-      .update({
-        status: "done",
-        audio_path: audioPath,
-        completed_at: new Date().toISOString(),
-        error_code: null,
-        error_message: null,
-        error_at: null,
-      })
-      .eq("id", jobId);
-  } catch (e) {
-    console.error("❌ Failed to update job done:", e?.message || e);
-  }
-}
-
-async function claimNextJob() {
-  // Most common param name: p_worker_id
-  // If your SQL function uses a different name, set CLAIM_RPC_NAME & param in SQL accordingly.
-  const attempts = [
-    { p_worker_id: WORKER_ID },
-    { worker_id: WORKER_ID },
-    { p_worker: WORKER_ID },
-  ];
-
-  for (const params of attempts) {
-    const { data, error } = await supabase.rpc(CLAIM_RPC_NAME, params);
-    if (!error) return pickFirstJob(data);
-  }
-
-  // If all attempts fail, return null (will sleep)
-  return null;
-}
-
-async function elevenLabsGenerateAudio(text) {
-  // Endpoint you use already:
-  const url = "https://api.elevenlabs.io/v1/sound-generation";
+  const body = {
+    text,
+    model_id: model_id || "eleven_multilingual_v2",
+    ...(voiceSettings ? { voice_settings: voiceSettings } : {}),
+    output_format: outputFormat,
+  };
 
   const res = await fetch(url, {
     method: "POST",
     headers: {
-      "xi-api-key": ELEVENLABS_API_KEY,
-      "content-type": "application/json",
-      accept: "*/*",
+      "xi-api-key": CONFIG.ELEVENLABS_API_KEY,
+      "Content-Type": "application/json",
+      Accept: "audio/mpeg",
     },
-    body: JSON.stringify({
-      text, // ✅ REQUIRED (your error says body.text missing)
-    }),
+    body: JSON.stringify(body),
   });
 
-  // Try JSON error body
   if (!res.ok) {
-    let errText = "";
-    try {
-      errText = await res.text();
-    } catch {}
-    const status = res.status;
-    throw new Error(`ElevenLabs HTTP ${status}: ${errText}`);
+    const errText = await safeReadText(res);
+    throw new Error(`ElevenLabs HTTP ${res.status}: ${errText}`);
   }
 
   const contentType = res.headers.get("content-type") || "";
-
-  // If ElevenLabs returns audio bytes:
-  if (contentType.includes("audio") || contentType.includes("octet-stream")) {
-    const buf = Buffer.from(await res.arrayBuffer());
-    return { kind: "audio", buffer: buf };
+  if (!contentType.includes("audio")) {
+    const preview = await safeReadText(res);
+    throw new Error(`ElevenLabs response missing audio (content-type: ${contentType}) :: ${preview}`);
   }
 
-  // Otherwise assume JSON
-  const json = await res.json();
+  const arrayBuffer = await res.arrayBuffer();
+  const buf = Buffer.from(arrayBuffer);
+  if (!buf.length) throw new Error("ElevenLabs returned empty audio buffer");
 
-  // Support base64 fields (some APIs return audio as base64)
-  if (json?.audio_base64) {
-    const buf = Buffer.from(json.audio_base64, "base64");
-    return { kind: "audio", buffer: buf };
-  }
-
-  // Support URL field
-  if (json?.audio_url) {
-    // download it
-    const dl = await fetch(json.audio_url);
-    if (!dl.ok) throw new Error(`Failed to download audio_url: ${dl.status}`);
-    const buf = Buffer.from(await dl.arrayBuffer());
-    return { kind: "audio", buffer: buf };
-  }
-
-  // If nothing matched:
-  throw new Error(`ElevenLabs response missing audio (content-type: ${contentType})`);
+  return buf;
 }
 
-async function uploadAudio(jobId, buffer) {
-  const filename = `jobs/${jobId}.mp3`;
-  const { error } = await supabase.storage
-    .from(MUSIC_BUCKET)
-    .upload(filename, buffer, {
+async function safeReadText(res) {
+  try {
+    return await res.text();
+  } catch {
+    return "(failed to read body)";
+  }
+}
+
+/**
+ * Upload MP3 to Supabase Storage bucket and return signed URL.
+ */
+async function uploadToStorage({ jobId, mp3Buffer }) {
+  const filePath = `voice/${jobId}.mp3`;
+
+  // Upload (upsert true so retries overwrite)
+  const { error: upErr } = await supabase.storage
+    .from(CONFIG.VOICE_BUCKET)
+    .upload(filePath, mp3Buffer, {
       contentType: "audio/mpeg",
       upsert: true,
     });
 
-  if (error) throw new Error(`Storage upload error: ${error.message}`);
-  return filename;
+  if (upErr) throw new Error(`Storage upload error: ${upErr.message}`);
+
+  // Signed URL (works even for private bucket)
+  const { data: signed, error: signedErr } = await supabase.storage
+    .from(CONFIG.VOICE_BUCKET)
+    .createSignedUrl(filePath, CONFIG.VOICE_SIGNED_URL_TTL_SECONDS);
+
+  if (signedErr) throw new Error(`Signed URL error: ${signedErr.message}`);
+
+  return { filePath, signedUrl: signed?.signedUrl || null };
 }
 
-async function loop() {
-  console.log("✅ Config OK");
-  console.log("🎵 MUSIC WORKER — SAFE FINAL");
-  console.log("DB table: music_jobs");
-  console.log("Bucket:", MUSIC_BUCKET);
-  console.log("Endpoint: https://api.elevenlabs.io/v1/sound-generation");
-  console.log("Poll:", `${POLL_INTERVAL_MS}ms`);
-  console.log("RPC:", CLAIM_RPC_NAME);
-  console.log("Worker ID:", WORKER_ID);
-  console.log("====================================================");
+/**
+ * Claims one queued job atomically-ish:
+ * - Fetch oldest queued
+ * - Try to update it to processing only if still queued
+ */
+async function claimNextJob() {
+  const { data: jobs, error } = await supabase
+    .from("voice_jobs")
+    .select("id,status,text,voice_id,model_id,settings,retries,created_at")
+    .eq("status", "queued")
+    .order("created_at", { ascending: true })
+    .limit(1);
 
-  while (true) {
+  if (error) throw new Error(`Supabase select error: ${error.message}`);
+  if (!jobs?.length) return null;
+
+  const job = jobs[0];
+
+  const now = new Date().toISOString();
+  const { data: claimed, error: claimErr } = await supabase
+    .from("voice_jobs")
+    .update({
+      status: "processing",
+      started_at: now,
+      updated_at: now,
+    })
+    .eq("id", job.id)
+    .eq("status", "queued")
+    .select("id,status,text,voice_id,model_id,settings,retries,created_at")
+    .single();
+
+  if (claimErr) {
+    // If another worker grabbed it, ignore
+    return null;
+  }
+
+  return claimed || null;
+}
+
+async function markError(jobId, errMsg, retriesNext) {
+  const now = new Date().toISOString();
+  const status = retriesNext >= CONFIG.MAX_RETRIES ? "error" : "queued";
+  const { error } = await supabase
+    .from("voice_jobs")
+    .update({
+      status,
+      error: errMsg,
+      retries: retriesNext,
+      updated_at: now,
+      error_at: now,
+    })
+    .eq("id", jobId);
+
+  if (error) console.error("❌ Failed to update error status:", error.message);
+}
+
+async function markDone(jobId, audioUrl, filePath) {
+  const now = new Date().toISOString();
+  const { error } = await supabase
+    .from("voice_jobs")
+    .update({
+      status: "completed",
+      audio_url: audioUrl,
+      audio_path: filePath,
+      error: null,
+      updated_at: now,
+      completed_at: now,
+    })
+    .eq("id", jobId);
+
+  if (error) throw new Error(`Failed to mark completed: ${error.message}`);
+}
+
+let running = true;
+process.on("SIGINT", () => (running = false));
+process.on("SIGTERM", () => (running = false));
+
+async function main() {
+  console.log("✅ Voice Worker started");
+  console.log(`• bucket: ${CONFIG.VOICE_BUCKET}`);
+  console.log(`• poll: ${CONFIG.POLL_INTERVAL_MS}ms`);
+  console.log(`• max_retries: ${CONFIG.MAX_RETRIES}`);
+
+  while (running) {
     try {
       const job = await claimNextJob();
 
       if (!job) {
-        console.log("⏳ No job. Sleeping...");
-        await sleep(POLL_INTERVAL_MS);
+        await sleep(CONFIG.POLL_INTERVAL_MS);
         continue;
       }
 
       const jobId = job.id;
-      const prompt =
-        job.prompt ??
-        job.text ??
-        job.input_text ??
-        job.request_text ??
-        null;
+      const text = String(job.text || "").trim();
+      const voiceId = String(job.voice_id || "").trim();
+      const modelId = String(job.model_id || "").trim() || "eleven_multilingual_v2";
+      const settings = job.settings || {};
+      const retries = Number(job.retries || 0);
 
-      console.log("🎯 Claimed job:", jobId);
+      if (!text) throw new Error("Job missing text");
+      if (!voiceId) throw new Error("Job missing voice_id");
 
-      if (!jobId) {
-        console.warn("⚠️ Claimed job missing id. Skipping.");
-        await sleep(POLL_INTERVAL_MS);
-        continue;
-      }
+      console.log(`🎙️ Processing voice job ${jobId} (retry=${retries})`);
 
-      if (!prompt || String(prompt).trim().length === 0) {
-        console.warn("⚠️ Job prompt missing. Marking error.");
-        await markJobError(jobId, "400", "Missing prompt/text in job row");
-        await sleep(POLL_INTERVAL_MS);
-        continue;
-      }
+      // Safety timeout per job
+      const timeoutPromise = new Promise((_, rej) =>
+        setTimeout(() => rej(new Error(`Job timeout after ${CONFIG.CLAIM_TIMEOUT_MS}ms`)), CONFIG.CLAIM_TIMEOUT_MS)
+      );
 
-      // Generate
-      const result = await elevenLabsGenerateAudio(String(prompt));
+      const workPromise = (async () => {
+        const mp3 = await elevenLabsTTS({
+          text,
+          voice_id: voiceId,
+          model_id: modelId,
+          settings,
+        });
 
-      if (result?.kind !== "audio" || !result.buffer) {
-        throw new Error("ElevenLabs returned no audio buffer");
-      }
+        const { filePath, signedUrl } = await uploadToStorage({ jobId, mp3Buffer: mp3 });
+        if (!signedUrl) throw new Error("Failed to generate signed URL");
 
-      // Upload
-      const audioPath = await uploadAudio(jobId, result.buffer);
+        await markDone(jobId, signedUrl, filePath);
+        console.log(`✅ Completed voice job ${jobId}`);
+      })();
 
-      // Done
-      await markJobDone(jobId, audioPath);
-
-      console.log("✅ Completed:", jobId, "->", audioPath);
-      await sleep(250); // tiny pause
+      await Promise.race([workPromise, timeoutPromise]);
     } catch (err) {
-      console.error("❌ MUSIC WORKER ERROR");
-      console.error("err:", err?.message || err);
-      // IMPORTANT: do NOT crash; just backoff a bit
-      await sleep(2000);
+      const msg = err?.message || String(err);
+      console.error("❌ VOICE WORKER ERROR:", msg);
+
+      // If we can detect jobId from logs? Not safe. Best effort:
+      // We'll attempt to locate the latest processing job older than 2 minutes without completed_at.
+      try {
+        const { data: stuck, error } = await supabase
+          .from("voice_jobs")
+          .select("id,retries,updated_at")
+          .eq("status", "processing")
+          .order("updated_at", { ascending: true })
+          .limit(1);
+
+        if (!error && stuck?.length) {
+          const job = stuck[0];
+          const retriesNext = Number(job.retries || 0) + 1;
+          await markError(job.id, msg, retriesNext);
+        }
+      } catch (e2) {
+        console.error("❌ Failed to mark error for processing job:", e2?.message || String(e2));
+      }
+
+      await sleep(CONFIG.POLL_INTERVAL_MS);
     }
   }
+
+  console.log("🛑 Voice Worker stopped");
 }
 
-loop().catch((e) => {
-  console.error("Fatal:", e?.message || e);
+main().catch((e) => {
+  console.error("❌ Fatal:", e?.message || String(e));
   process.exit(1);
 });
