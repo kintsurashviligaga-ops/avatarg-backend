@@ -2,32 +2,33 @@ import OpenAI from "openai";
 
 export const runtime = "edge";
 
+type Role = "system" | "user" | "assistant";
+type Msg = { role: Role; content: string };
+
 // =========================
 // ✅ OpenAI client (Edge)
 // =========================
 const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!,
+  apiKey: process.env.OPENAI_API_KEY || "",
 });
 
 // =========================
-// ✅ CORS (recommended: set strict frontend origin)
+// ✅ CORS (recommended: strict frontend origin)
 // =========================
-// ✅ Vercel Env-ში რეკომენდებული:
+// Vercel Env რეკომენდაცია:
 // NEXT_PUBLIC_FRONTEND_ORIGIN = https://avatar-g.vercel.app
-// თუ დატოვებ ცარიელს -> ავტომატურად იმუშავებს origin-reflect რეჟიმში (safe default)
+// თუ ცარიელია -> origin-reflect რეჟიმი (safe default)
 const ALLOWED_ORIGIN = (process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "").trim();
 
 function corsHeaders(origin?: string) {
-  const reqOrigin = origin || "";
-  const isStrict = ALLOWED_ORIGIN.length > 0;
+  const reqOrigin = (origin || "").trim();
+  const strict = ALLOWED_ORIGIN.length > 0;
 
-  // Strict რეჟიმში მხოლოდ ALLOWED_ORIGIN
-  // Non-strict რეჟიმში origin-reflect (უსაფრთხო და მუშაობს credentials-თანაც)
-  const allowOrigin = isStrict ? ALLOWED_ORIGIN : reqOrigin || "*";
+  // strict => მხოლოდ შენი origin
+  // non-strict => reflect origin (credentials-friendly)
+  const allowOrigin = strict ? ALLOWED_ORIGIN : reqOrigin || "*";
 
-  // NOTE:
-  // Access-Control-Allow-Credentials: true არ შეიძლება "*" origin-თან ერთად.
-  // ამიტომ credentials=true მხოლოდ მაშინ ვრთავთ, როცა კონკრეტული origin გვაქვს.
+  // credentials=true არ შეიძლება "*" origin-თან ერთად
   const allowCreds = allowOrigin !== "*" ? "true" : "false";
 
   return {
@@ -68,16 +69,13 @@ Output rules:
 - Keep answers concise unless user requests detailed
 `.trim();
 
-type Role = "system" | "user" | "assistant";
-type Msg = { role: Role; content: string };
-
 function normalizeMessages(input: any): Msg[] {
   if (!Array.isArray(input)) return [];
 
-  const cleaned = input
+  const cleaned: Msg[] = input
     .filter((m) => m && typeof m === "object")
     .map((m) => ({
-      role: m.role as Role,
+      role: String(m.role) as Role,
       content: String(m.content ?? ""),
     }))
     .filter(
@@ -86,6 +84,7 @@ function normalizeMessages(input: any): Msg[] {
         m.content.trim().length > 0
     );
 
+  // limit history
   const MAX_HISTORY = 30;
   return cleaned.slice(-MAX_HISTORY);
 }
@@ -110,6 +109,16 @@ export async function POST(req: Request) {
     const body = await req.json().catch(() => ({}));
     const messages = normalizeMessages(body?.messages);
 
+    if (!messages.length) {
+      return new Response("Missing messages[]", {
+        status: 400,
+        headers: {
+          ...corsHeaders(origin),
+          "Content-Type": "text/plain; charset=utf-8",
+        },
+      });
+    }
+
     const finalMessages: Msg[] = [
       { role: "system", content: SYSTEM_PROMPT },
       ...messages,
@@ -131,12 +140,16 @@ export async function POST(req: Request) {
 
         for await (const chunk of completion) {
           const text = chunk.choices?.[0]?.delta?.content;
-          if (text) await writer.write(encoder.encode(text));
+          if (text) {
+            await writer.write(encoder.encode(text));
+          }
         }
       } catch (e: any) {
         const msg =
           e?.message ? `\n\n[Error] ${e.message}` : "\n\n[Error] Unknown error";
-        await writer.write(encoder.encode(msg));
+        try {
+          await writer.write(encoder.encode(msg));
+        } catch {}
       } finally {
         try {
           await writer.close();
