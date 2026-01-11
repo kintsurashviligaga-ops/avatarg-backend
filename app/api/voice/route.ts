@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-export const runtime = "nodejs"; // ✅ ElevenLabs + Supabase admin = stable on node
+export const runtime = "nodejs"; // ✅ Required for ElevenLabs + Supabase Admin
 
+/* ----------------------------- CORS ----------------------------- */
 function corsHeaders(origin?: string | null) {
   const allowed =
-    process.env.NEXT_PUBLIC_FRONTEND_ORIGIN && process.env.NEXT_PUBLIC_FRONTEND_ORIGIN !== "*"
-      ? process.env.NEXT_PUBLIC_FRONTEND_ORIGIN
-      : "*";
+    process.env.NEXT_PUBLIC_FRONTEND_ORIGIN ??
+    "*";
 
   return {
     "Access-Control-Allow-Origin": allowed === "*" ? "*" : origin || allowed,
@@ -19,62 +19,85 @@ function corsHeaders(origin?: string | null) {
 }
 
 export async function OPTIONS(req: Request) {
-  return new Response(null, { status: 204, headers: corsHeaders(req.headers.get("origin")) });
+  return new Response(null, {
+    status: 204,
+    headers: corsHeaders(req.headers.get("origin")),
+  });
 }
 
+/* ----------------------------- POST ----------------------------- */
+/**
+ * Creates a voice generation job
+ * Worker will pick it up and process with ElevenLabs
+ */
 export async function POST(req: Request) {
-  try {
-    const origin = req.headers.get("origin");
-    const headers = corsHeaders(origin);
+  const origin = req.headers.get("origin");
+  const headers = corsHeaders(origin);
 
+  try {
     const body = await req.json().catch(() => null);
 
-    const text = String(body?.text ?? "").trim();
-    const voiceId = String(body?.voiceId ?? body?.voice_id ?? "").trim();
-    const modelId = String(body?.modelId ?? body?.model_id ?? "eleven_multilingual_v2").trim();
-
-    // optional (nice defaults)
-    const stability = typeof body?.stability === "number" ? body.stability : 0.35;
-    const similarityBoost = typeof body?.similarityBoost === "number" ? body.similarityBoost : 0.85;
-
-    if (!text) {
-      return NextResponse.json({ error: "Missing text" }, { status: 400, headers });
-    }
-    if (!voiceId) {
-      return NextResponse.json({ error: "Missing voiceId" }, { status: 400, headers });
+    if (!body?.text) {
+      return NextResponse.json(
+        { error: "Missing required field: text" },
+        { status: 400, headers }
+      );
     }
 
-    // ✅ Create job record (worker will process with ElevenLabs)
+    const {
+      text,
+      voice_id = "default",
+      model_id = "eleven_multilingual_v2",
+      output_format = "mp3_44100_128",
+      stability = 0.5,
+      similarity_boost = 0.75,
+      style = 0.0,
+      use_speaker_boost = true,
+      user_id = null,
+      metadata = null,
+    } = body;
+
     const { data, error } = await supabaseAdmin
       .from("voice_jobs")
       .insert({
-        status: "queued",
+        user_id,
         text,
-        voice_id: voiceId,
-        model_id: modelId,
-        settings: {
-          stability,
-          similarity_boost: similarityBoost,
-        },
-        created_at: new Date().toISOString(),
+        voice_id,
+        model_id,
+        output_format,
+        stability,
+        similarity_boost,
+        style,
+        use_speaker_boost,
+        status: "queued",
+        metadata,
       })
-      .select("id")
+      .select()
       .single();
 
     if (error) {
-      console.error("❌ voice_jobs insert error:", error);
-      return NextResponse.json({ error: "DB insert failed", details: error.message }, { status: 500, headers });
+      console.error("Supabase insert error:", error);
+      return NextResponse.json(
+        { error: "Failed to create voice job" },
+        { status: 500, headers }
+      );
     }
 
     return NextResponse.json(
-      { ok: true, jobId: data.id, status: "queued" },
-      { status: 200, headers }
+      {
+        success: true,
+        job: data,
+      },
+      { status: 201, headers }
     );
   } catch (err: any) {
-    console.error("❌ /api/voice error:", err?.message ?? err);
+    console.error("Voice API error:", err);
     return NextResponse.json(
-      { error: "Internal error", details: err?.message ?? String(err) },
-      { status: 500 }
+      {
+        error: "Internal server error",
+        details: err?.message ?? String(err),
+      },
+      { status: 500, headers }
     );
   }
 }
