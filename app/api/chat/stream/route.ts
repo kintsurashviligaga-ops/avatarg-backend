@@ -12,13 +12,17 @@ const client = new OpenAI({
 // =========================
 // ✅ CORS (set your frontend URL if you want strict)
 // =========================
-const ALLOWED_ORIGIN =
-  process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "*";
+// თუ გინდა მხოლოდ შენი front-იდან მიიღოს, Vercel Env-ში ჩაწერე:
+// NEXT_PUBLIC_FRONTEND_ORIGIN = https://avatar-g.vercel.app
+// ან დატოვე ცარიელი და იმუშავებს "*"-ით
+const ALLOWED_ORIGIN = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "*";
 
 function corsHeaders(origin?: string) {
-  const o = origin && ALLOWED_ORIGIN !== "*" ? origin : ALLOWED_ORIGIN;
+  const allowOrigin =
+    ALLOWED_ORIGIN === "*" ? "*" : origin && origin === ALLOWED_ORIGIN ? origin : ALLOWED_ORIGIN;
+
   return {
-    "Access-Control-Allow-Origin": o,
+    "Access-Control-Allow-Origin": allowOrigin,
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Allow-Credentials": "true",
@@ -37,57 +41,53 @@ export async function OPTIONS(req: Request) {
 // =========================
 const SYSTEM_PROMPT = `
 You are Avatar G — a professional AI assistant for the AvatarG platform.
-Default language: Georgian (ka). If user writes in another language, reply in that language.
+
+Default language: Georgian (ka). If user writes in another language, respond in that language.
 
 Tone: confident, helpful, friendly, business-grade.
-Ask 1–2 follow-up questions only when necessary.
+Be concise and clear.
+Ask 1-2 follow-up questions only when necessary.
 Never hallucinate external facts. If unsure, say you are unsure.
 
 Platform scope:
 - AI Chat help, product guidance, marketing suggestions
-- Music / Video / Image workflows guidance (based on the platform)
-- Be practical and action-oriented.
+- Music / Video / Image workflows guidance
+- Be practical and action-oriented
 
 Output rules:
-- Prefer bullet points and step-by-step instructions.
-- Keep answers concise unless user requests detailed.
+- Prefer bullet points and step-by-step instructions
+- Keep answers concise unless user requests detailed
 `.trim();
 
-// =========================
-// ✅ Types + normalize
-// =========================
 type Role = "system" | "user" | "assistant";
 type Msg = { role: Role; content: string };
 
 function normalizeMessages(input: any): Msg[] {
   if (!Array.isArray(input)) return [];
-  const out: Msg[] = [];
 
-  for (const m of input) {
-    if (!m || typeof m !== "object") continue;
-    const role = m.role;
-    const content = m.content;
+  const cleaned = input
+    .filter((m) => m && typeof m === "object")
+    .map((m) => ({
+      role: m.role as Role,
+      content: String(m.content ?? ""),
+    }))
+    .filter((m) => (m.role === "user" || m.role === "assistant") && m.content.trim().length > 0);
 
-    if (
-      (role === "user" || role === "assistant" || role === "system") &&
-      typeof content === "string" &&
-      content.trim().length > 0
-    ) {
-      out.push({ role, content: content.trim() });
-    }
-  }
-
-  // limit conversation size to avoid huge payloads
-  return out.slice(-30);
+  // optional: limit history size
+  const MAX_HISTORY = 30;
+  return cleaned.slice(-MAX_HISTORY);
 }
 
 // =========================
-// ✅ POST: stream TEXT only
+// ✅ POST: stream plain text (NOT JSON)
 // =========================
 export async function POST(req: Request) {
   const origin = req.headers.get("origin") || undefined;
 
   try {
+    const body = await req.json().catch(() => ({}));
+    const messages = normalizeMessages(body?.messages);
+
     if (!process.env.OPENAI_API_KEY) {
       return new Response("Missing OPENAI_API_KEY", {
         status: 500,
@@ -98,44 +98,43 @@ export async function POST(req: Request) {
       });
     }
 
-    const body = await req.json().catch(() => null);
-    const messages = normalizeMessages(body?.messages);
-
-    // Always inject system message on top
+    // Build final messages with system prompt
     const finalMessages: Msg[] = [
       { role: "system", content: SYSTEM_PROMPT },
       ...messages,
     ];
 
-    // Create stream
-    const stream = await client.chat.completions.create({
-      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-      messages: finalMessages,
-      stream: true,
-      temperature: 0.7,
-    });
-
+    // Create a TransformStream so we can write chunks to the response as they arrive
+    const stream = new TransformStream<Uint8Array, Uint8Array>();
+    const writer = stream.writable.getWriter();
     const encoder = new TextEncoder();
 
-    const readable = new ReadableStream<Uint8Array>({
-      async start(controller) {
-        try {
-          for await (const chunk of stream) {
-            const delta = chunk?.choices?.[0]?.delta?.content;
-            if (delta) controller.enqueue(encoder.encode(delta));
-          }
-        } catch (e: any) {
-          // If stream breaks, return a friendly text message
-          controller.enqueue(
-            encoder.encode("\n\n⚠️ ბოდიში, ჩატის სტრიმინგში შეცდომა მოხდა.")
-          );
-        } finally {
-          controller.close();
-        }
-      },
-    });
+    // Fire-and-forget async streaming
+    (async () => {
+      try {
+        const completion = await client.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: finalMessages,
+          stream: true,
+          temperature: 0.7,
+        });
 
-    return new Response(readable, {
+        for await (const chunk of completion) {
+          const text = chunk.choices?.[0]?.delta?.content;
+          if (text) {
+            await writer.write(encoder.encode(text));
+          }
+        }
+      } catch (e: any) {
+        // write readable error text into stream (still plain text)
+        const msg = e?.message ? `\n\n[Error] ${e.message}` : "\n\n[Error] Unknown error";
+        await writer.write(encoder.encode(msg));
+      } finally {
+        await writer.close();
+      }
+    })();
+
+    return new Response(stream.readable, {
       status: 200,
       headers: {
         ...corsHeaders(origin),
@@ -144,18 +143,12 @@ export async function POST(req: Request) {
       },
     });
   } catch (err: any) {
-    // IMPORTANT: return plain text (NOT JSON) so UI never prints JSON
-    const msg =
-      err?.message ||
-      "Unknown error while generating response.";
-
-    return new Response(`⚠️ Error: ${msg}`, {
+    return new Response(err?.message ? `Error: ${err.message}` : "Unknown error", {
       status: 500,
       headers: {
         ...corsHeaders(origin),
         "Content-Type": "text/plain; charset=utf-8",
-        "Cache-Control": "no-cache",
       },
     });
   }
-}
+      }
