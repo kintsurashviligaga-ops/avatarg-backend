@@ -1,125 +1,128 @@
+import OpenAI from "openai";
 import { NextResponse } from "next/server";
-import { withCORS, corsOPTIONS } from "../utils/cors";
 
-const CONFIG = {
-  MAX_MESSAGE_LENGTH: 6000,
-  OPENAI_TIMEOUT_MS: 28000,
-  DEFAULT_MODEL: process.env.OPENAI_MODEL || "gpt-4o-mini",
-};
+export const runtime = "edge";
 
-// OPTIONS — CORS preflight
-export async function OPTIONS(req) {
-  return corsOPTIONS(req);
+// ===============================
+// OpenAI client
+// ===============================
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY!,
+});
+
+// ===============================
+// CORS helper (safe + production)
+// ===============================
+const ALLOWED_ORIGIN =
+  process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "*";
+
+function cors(origin?: string) {
+  return {
+    "Access-Control-Allow-Origin":
+      ALLOWED_ORIGIN === "*" ? "*" : origin || ALLOWED_ORIGIN,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Credentials": "true",
+    "Vary": "Origin",
+  };
 }
 
-function jsonError(req, status, code, message, extra = {}) {
-  return withCORS(
-    req,
-    NextResponse.json(
-      {
-        ok: false,
-        error: message,
-        code,
-        ...extra,
-      },
-      { status }
-    )
-  );
+// ===============================
+// Preflight
+// ===============================
+export async function OPTIONS(req: Request) {
+  return new Response(null, {
+    status: 204,
+    headers: cors(req.headers.get("origin") || undefined),
+  });
 }
 
-export async function POST(req) {
+// ===============================
+// POST /api/ai
+// ===============================
+export async function POST(req: Request) {
+  const origin = req.headers.get("origin") || undefined;
+
   try {
-    let body;
-
-    try {
-      body = await req.json();
-    } catch {
-      return jsonError(
-        req,
-        400,
-        "INVALID_JSON",
-        "Request body must be valid JSON"
-      );
-    }
-
-    const { messages, model } = body;
-
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return jsonError(
-        req,
-        400,
-        "INVALID_MESSAGES",
-        "`messages` must be a non-empty array"
-      );
-    }
-
-    const userMessage = messages[messages.length - 1]?.content || "";
-
-    if (userMessage.length > CONFIG.MAX_MESSAGE_LENGTH) {
-      return jsonError(
-        req,
-        413,
-        "MESSAGE_TOO_LARGE",
-        "Message is too long",
-        { max: CONFIG.MAX_MESSAGE_LENGTH }
-      );
-    }
-
     if (!process.env.OPENAI_API_KEY) {
-      return jsonError(
-        req,
-        500,
-        "OPENAI_KEY_MISSING",
-        "OPENAI_API_KEY is not set"
-      );
+      return new Response("OPENAI_API_KEY missing", {
+        status: 500,
+        headers: cors(origin),
+      });
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(
-      () => controller.abort(),
-      CONFIG.OPENAI_TIMEOUT_MS
-    );
+    const body = await req.json().catch(() => ({}));
 
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+    const userMessage =
+      typeof body?.message === "string" ? body.message.trim() : "";
+
+    const history = Array.isArray(body?.messages)
+      ? body.messages.filter(
+          (m: any) =>
+            m &&
+            (m.role === "user" || m.role === "assistant") &&
+            typeof m.content === "string"
+        )
+      : [];
+
+    if (!userMessage) {
+      return new Response("Empty message", {
+        status: 400,
+        headers: cors(origin),
+      });
+    }
+
+    const messages = [
+      {
+        role: "system",
+        content:
+          "You are Avatar G — a professional AI assistant. Default language: Georgian.",
       },
-      body: JSON.stringify({
-        model: model || CONFIG.DEFAULT_MODEL,
-        messages,
-      }),
-    }).finally(() => clearTimeout(timeout));
+      ...history,
+      { role: "user", content: userMessage },
+    ];
 
-    if (!response.ok) {
-      const err = await response.text();
-      return jsonError(
-        req,
-        response.status,
-        "OPENAI_ERROR",
-        "OpenAI API error",
-        { details: err }
-      );
-    }
+    // 🔥 STREAM RESPONSE (plain text)
+    const stream = new TransformStream();
+    const writer = stream.writable.getWriter();
+    const encoder = new TextEncoder();
 
-    const data = await response.json();
+    (async () => {
+      try {
+        const completion = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages,
+          temperature: 0.7,
+          stream: true,
+        });
 
-    return withCORS(
-      req,
-      NextResponse.json({
-        ok: true,
-        result: data,
-      })
-    );
-  } catch (err) {
-    const isAbort = err?.name === "AbortError";
-    return jsonError(
-      req,
-      isAbort ? 504 : 500,
-      isAbort ? "TIMEOUT" : "INTERNAL_ERROR",
-      isAbort ? "OpenAI request timed out" : "Internal server error"
-    );
+        for await (const chunk of completion) {
+          const text = chunk.choices?.[0]?.delta?.content;
+          if (text) {
+            await writer.write(encoder.encode(text));
+          }
+        }
+      } catch (e: any) {
+        await writer.write(
+          encoder.encode("\n\n[Error] " + (e?.message || "Unknown error"))
+        );
+      } finally {
+        await writer.close();
+      }
+    })();
+
+    return new Response(stream.readable, {
+      status: 200,
+      headers: {
+        ...cors(origin),
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+      },
+    });
+  } catch (e: any) {
+    return new Response("Server error: " + e?.message, {
+      status: 500,
+      headers: cors(origin),
+    });
   }
 }
