@@ -1,41 +1,30 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 export const runtime = "nodejs";
 
-function getSupabase() {
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!supabaseUrl) throw new Error("SUPABASE_URL is required");
-  if (!serviceRoleKey) throw new Error("SUPABASE_SERVICE_ROLE_KEY is required");
-
-  return createClient(supabaseUrl, serviceRoleKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
+function required(name: string) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env: ${name}`);
+  return v;
 }
 
-// POST { path: "music/filename.mp3", expiresIn?: 3600 }
 export async function POST(req: Request) {
   try {
-    const { path, expiresIn } = await req.json();
+    const { key, contentType } = await req.json();
 
-    if (!path || typeof path !== "string") {
-      return NextResponse.json({ error: "path is required" }, { status: 400 });
+    if (!key || typeof key !== "string") {
+      return NextResponse.json({ error: "Missing 'key' (string)" }, { status: 400 });
     }
 
-    const supabase = getSupabase();
+    const R2_ENDPOINT = required("R2_ENDPOINT");
+    const R2_ACCESS_KEY_ID = required("R2_ACCESS_KEY_ID");
+    const R2_SECRET_ACCESS_KEY = required("R2_SECRET_ACCESS_KEY");
+    const R2_BUCKET_NAME = required("R2_BUCKET_NAME");
 
-    const { data, error } = await supabase.storage
-      .from("music")
-      .createSignedUrl(path, Number(expiresIn ?? 3600));
-
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    }
-
-    return NextResponse.json({ url: data.signedUrl });
-  } catch (err: any) {
-    return NextResponse.json(
-      { error: err?.message ?? "Unknown error" },
-      { status:
+    const s3 = new S3Client({
+      region: "auto",
+      endpoint: R2_ENDPOINT,
+      credentials: {
+        accessKeyId: R2_ACCESS_KEY_ID,
