@@ -6,13 +6,14 @@ const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY!,
 });
 
+// ✅ Avatar G System Prompt (Georgian-first)
 const SYSTEM_PROMPT = `
 You are Avatar G — a professional AI assistant for the AvatarG platform.
 Default language: Georgian (ka). If user writes in another language, reply in that language.
 
-Tone: confident, helpful, friendly, business-grade. Short and clear. 
+Tone: confident, helpful, friendly, business-grade.
 Ask 1–2 follow-up questions only when necessary.
-Never hallucinate external facts. If unsure, say you are unsure and suggest next steps.
+Never hallucinate external facts. If unsure, say you are unsure.
 
 Platform scope:
 - AI Chat help, product guidance, marketing suggestions
@@ -22,26 +23,39 @@ Platform scope:
 Output rules:
 - Prefer bullet points and step-by-step instructions.
 - Keep answers concise unless user requests detailed.
-`;
+`.trim();
 
-function normalizeMessages(input: any): Array<{ role: "system" | "user" | "assistant"; content: string }> {
+type Role = "system" | "user" | "assistant";
+
+type Msg = {
+  role: Role;
+  content: string;
+};
+
+function normalizeMessages(input: any): Msg[] {
   if (!Array.isArray(input)) return [];
-  return input
-    .filter((m) => m && typeof m === "object")
-    .map((m) => ({
-      role: m.role,
-      content: typeof m.content === "string" ? m.content : String(m.content ?? ""),
-    }))
-    .filter((m) => (m.role === "user" || m.role === "assistant") && m.content.length > 0);
+  const out: Msg[] = [];
+
+  for (const m of input) {
+    if (!m || typeof m !== "object") continue;
+    const role = m.role;
+    const content = m.content;
+
+    if ((role === "user" || role === "assistant") && typeof content === "string") {
+      out.push({ role, content });
+    }
+  }
+
+  return out;
 }
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json().catch(() => ({}));
+    const body = await req.json();
     const userMessages = normalizeMessages(body?.messages);
 
-    const messages = [
-      { role: "system" as const, content: SYSTEM_PROMPT },
+    const messages: Msg[] = [
+      { role: "system", content: SYSTEM_PROMPT },
       ...userMessages,
     ];
 
@@ -49,7 +63,7 @@ export async function POST(req: Request) {
       model: "gpt-4o-mini",
       messages,
       stream: true,
-      temperature: 0.6,
+      temperature: 0.7,
     });
 
     const encoder = new TextEncoder();
@@ -58,11 +72,11 @@ export async function POST(req: Request) {
       async start(controller) {
         try {
           for await (const chunk of stream) {
-            const content = chunk.choices?.[0]?.delta?.content;
-            if (content) controller.enqueue(encoder.encode(content));
+            const text = chunk.choices?.[0]?.delta?.content;
+            if (text) controller.enqueue(encoder.encode(text));
           }
-        } catch (e) {
-          controller.enqueue(encoder.encode("\n\n[stream error]\n"));
+        } catch (err) {
+          controller.error(err);
         } finally {
           controller.close();
         }
@@ -73,19 +87,14 @@ export async function POST(req: Request) {
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
         "Cache-Control": "no-cache, no-transform",
-        "X-Accel-Buffering": "no",
       },
     });
   } catch (err: any) {
-    return new Response(
-      JSON.stringify({
-        error: "Chat stream failed",
-        message: err?.message ?? String(err),
-      }),
-      {
-        status: 500,
-        headers: { "Content-Type": "application/json; charset=utf-8" },
-      }
-    );
+    // ❗ Even on error, return readable TEXT (so UI won't show JSON)
+    const msg = err?.message || "Unknown error";
+    return new Response(`Error: ${msg}`, {
+      status: 500,
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+    });
   }
 }
