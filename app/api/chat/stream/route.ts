@@ -2,11 +2,39 @@ import OpenAI from "openai";
 
 export const runtime = "edge";
 
+// =========================
+// ✅ OpenAI client (Edge)
+// =========================
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY!,
 });
 
-// ✅ Avatar G System Prompt (Georgian-first)
+// =========================
+// ✅ CORS (set your frontend URL if you want strict)
+// =========================
+const ALLOWED_ORIGIN =
+  process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "*";
+
+function corsHeaders(origin?: string) {
+  const o = origin && ALLOWED_ORIGIN !== "*" ? origin : ALLOWED_ORIGIN;
+  return {
+    "Access-Control-Allow-Origin": o,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Credentials": "true",
+    "Vary": "Origin",
+  } as Record<string, string>;
+}
+
+// Preflight
+export async function OPTIONS(req: Request) {
+  const origin = req.headers.get("origin") || undefined;
+  return new Response(null, { status: 204, headers: corsHeaders(origin) });
+}
+
+// =========================
+// ✅ System prompt (Georgian-first)
+// =========================
 const SYSTEM_PROMPT = `
 You are Avatar G — a professional AI assistant for the AvatarG platform.
 Default language: Georgian (ka). If user writes in another language, reply in that language.
@@ -17,7 +45,7 @@ Never hallucinate external facts. If unsure, say you are unsure.
 
 Platform scope:
 - AI Chat help, product guidance, marketing suggestions
-- Music / Video / Image workflows guidance (based on the platform features)
+- Music / Video / Image workflows guidance (based on the platform)
 - Be practical and action-oriented.
 
 Output rules:
@@ -25,12 +53,11 @@ Output rules:
 - Keep answers concise unless user requests detailed.
 `.trim();
 
+// =========================
+// ✅ Types + normalize
+// =========================
 type Role = "system" | "user" | "assistant";
-
-type Msg = {
-  role: Role;
-  content: string;
-};
+type Msg = { role: Role; content: string };
 
 function normalizeMessages(input: any): Msg[] {
   if (!Array.isArray(input)) return [];
@@ -41,42 +68,67 @@ function normalizeMessages(input: any): Msg[] {
     const role = m.role;
     const content = m.content;
 
-    if ((role === "user" || role === "assistant") && typeof content === "string") {
-      out.push({ role, content });
+    if (
+      (role === "user" || role === "assistant" || role === "system") &&
+      typeof content === "string" &&
+      content.trim().length > 0
+    ) {
+      out.push({ role, content: content.trim() });
     }
   }
 
-  return out;
+  // limit conversation size to avoid huge payloads
+  return out.slice(-30);
 }
 
+// =========================
+// ✅ POST: stream TEXT only
+// =========================
 export async function POST(req: Request) {
-  try {
-    const body = await req.json();
-    const userMessages = normalizeMessages(body?.messages);
+  const origin = req.headers.get("origin") || undefined;
 
-    const messages: Msg[] = [
+  try {
+    if (!process.env.OPENAI_API_KEY) {
+      return new Response("Missing OPENAI_API_KEY", {
+        status: 500,
+        headers: {
+          ...corsHeaders(origin),
+          "Content-Type": "text/plain; charset=utf-8",
+        },
+      });
+    }
+
+    const body = await req.json().catch(() => null);
+    const messages = normalizeMessages(body?.messages);
+
+    // Always inject system message on top
+    const finalMessages: Msg[] = [
       { role: "system", content: SYSTEM_PROMPT },
-      ...userMessages,
+      ...messages,
     ];
 
+    // Create stream
     const stream = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages,
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      messages: finalMessages,
       stream: true,
       temperature: 0.7,
     });
 
     const encoder = new TextEncoder();
 
-    const readable = new ReadableStream({
+    const readable = new ReadableStream<Uint8Array>({
       async start(controller) {
         try {
           for await (const chunk of stream) {
-            const text = chunk.choices?.[0]?.delta?.content;
-            if (text) controller.enqueue(encoder.encode(text));
+            const delta = chunk?.choices?.[0]?.delta?.content;
+            if (delta) controller.enqueue(encoder.encode(delta));
           }
-        } catch (err) {
-          controller.error(err);
+        } catch (e: any) {
+          // If stream breaks, return a friendly text message
+          controller.enqueue(
+            encoder.encode("\n\n⚠️ ბოდიში, ჩატის სტრიმინგში შეცდომა მოხდა.")
+          );
         } finally {
           controller.close();
         }
@@ -84,17 +136,26 @@ export async function POST(req: Request) {
     });
 
     return new Response(readable, {
+      status: 200,
       headers: {
+        ...corsHeaders(origin),
         "Content-Type": "text/plain; charset=utf-8",
         "Cache-Control": "no-cache, no-transform",
       },
     });
   } catch (err: any) {
-    // ❗ Even on error, return readable TEXT (so UI won't show JSON)
-    const msg = err?.message || "Unknown error";
-    return new Response(`Error: ${msg}`, {
+    // IMPORTANT: return plain text (NOT JSON) so UI never prints JSON
+    const msg =
+      err?.message ||
+      "Unknown error while generating response.";
+
+    return new Response(`⚠️ Error: ${msg}`, {
       status: 500,
-      headers: { "Content-Type": "text/plain; charset=utf-8" },
+      headers: {
+        ...corsHeaders(origin),
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-cache",
+      },
     });
   }
 }
