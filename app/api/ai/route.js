@@ -10,7 +10,7 @@ const openai = new OpenAI({
 });
 
 // ===============================
-// CORS helper
+// CORS
 // ===============================
 const ALLOWED_ORIGIN =
   process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "*";
@@ -27,7 +27,7 @@ function corsHeaders(origin) {
 }
 
 // ===============================
-// Preflight
+// OPTIONS (preflight)
 // ===============================
 export async function OPTIONS(req) {
   return new Response(null, {
@@ -43,8 +43,7 @@ export async function POST(req) {
   const origin = req.headers.get("origin");
 
   try {
-    const body = await req.json();
-    const messages = body?.messages;
+    const { messages } = await req.json();
 
     if (!Array.isArray(messages)) {
       return new Response(
@@ -59,10 +58,8 @@ export async function POST(req) {
       );
     }
 
-    // ===============================
-    // OpenAI Streaming
-    // ===============================
-    const stream = await openai.chat.completions.create({
+    // ===== OpenAI stream =====
+    const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages,
       temperature: 0.7,
@@ -71,17 +68,13 @@ export async function POST(req) {
 
     const encoder = new TextEncoder();
 
-    const readable = new ReadableStream({
+    const stream = new ReadableStream({
       async start(controller) {
         try {
-          for await (const chunk of stream) {
-            const content =
-              chunk.choices?.[0]?.delta?.content;
-
-            if (content) {
-              controller.enqueue(
-                encoder.encode(content)
-              );
+          for await (const chunk of completion) {
+            const text = chunk.choices?.[0]?.delta?.content;
+            if (text) {
+              controller.enqueue(encoder.encode(text));
             }
           }
         } catch (err) {
@@ -92,7 +85,7 @@ export async function POST(req) {
       },
     });
 
-    return new Response(readable, {
+    return new Response(stream, {
       status: 200,
       headers: {
         ...corsHeaders(origin),
