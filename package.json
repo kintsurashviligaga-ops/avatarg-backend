@@ -2,7 +2,7 @@
   "name": "avatarg-backend",
   "private": true,
   "version": "1.0.0",
-  "description": "Avatar G Backend (Next.js App Router) — /api/health, /api/ai, /api/chat/stream",
+  "description": "Avatar G Backend (Next.js App Router)",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -10,8 +10,12 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.560.0",
+    "@supabase/supabase-js": "^2.45.0",
     "next": "14.2.5",
-    "openai": "^4.56.0"
+    "openai": "^4.56.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",
