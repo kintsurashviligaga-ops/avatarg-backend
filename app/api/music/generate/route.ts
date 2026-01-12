@@ -4,6 +4,43 @@ import { createClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs"; // required for Buffer / binary
 
+// ---------------- Types ----------------
+type GenerateBody = {
+  mood?: string;
+  genre?: string;
+  language?: string;
+  topic?: string;
+  mustInclude?: string;
+  prompt?: string; // userPrompt
+  bpm?: number;
+  voiceId?: string;
+  // optional response control
+  responseMode?: "minimal" | "full"; // default: "full"
+};
+
+type OkResponse = {
+  ok: true;
+  title: string;
+  bpm: number;
+  lyrics: string;
+  tts_text: string;
+  voice: {
+    provider: "elevenlabs";
+    voiceId: string;
+    url: string | null;
+    storagePath: string | null;
+    bytes: number;
+    contentType: "audio/mpeg";
+  };
+  note: string;
+};
+
+type ErrResponse = {
+  ok: false;
+  error: string;
+  code?: string;
+};
+
 // ---------------- Helpers ----------------
 function json(data: any, status = 200, extraHeaders: Record<string, string> = {}) {
   return new Response(JSON.stringify(data), {
@@ -17,21 +54,27 @@ function json(data: any, status = 200, extraHeaders: Record<string, string> = {}
 }
 
 function corsHeaders(origin?: string) {
-  // If you want to lock this down later:
-  // const allow = (process.env.CORS_ALLOWLIST ?? "").split(",").map(s => s.trim()).filter(Boolean);
-  // const o = origin && allow.includes(origin) ? origin : allow[0] ?? "*";
-  const o = origin ?? "*";
+  const allowlist = (process.env.CORS_ALLOWLIST ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  let o = origin ?? "*";
+  if (allowlist.length > 0) {
+    o = origin && allowlist.includes(origin) ? origin : allowlist[0];
+  }
 
   return {
     "access-control-allow-origin": o,
     "access-control-allow-methods": "POST,OPTIONS",
     "access-control-allow-headers": "content-type, authorization",
     "access-control-max-age": "86400",
+    "vary": "Origin",
   };
 }
 
 function safeFileName(s: string) {
-  return s
+  return String(s || "")
     .toLowerCase()
     .replace(/[^a-z0-9-_]+/g, "-")
     .replace(/-+/g, "-")
@@ -39,47 +82,100 @@ function safeFileName(s: string) {
     .slice(0, 60);
 }
 
+function nowStamp() {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(
+    now.getHours()
+  )}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+}
+
+async function safeReadText(res: Response) {
+  try {
+    return await res.text();
+  } catch {
+    return "";
+  }
+}
+
+function normalizeBody(raw: any): Required<Pick<GenerateBody, "mood" | "genre" | "language" | "topic" | "mustInclude">> &
+  Pick<GenerateBody, "prompt" | "bpm" | "voiceId" | "responseMode"> {
+  const mood = typeof raw?.mood === "string" && raw.mood.trim() ? raw.mood.trim() : "Happy / festive";
+  const genre = typeof raw?.genre === "string" && raw.genre.trim() ? raw.genre.trim() : "Pop";
+  const language = typeof raw?.language === "string" && raw.language.trim() ? raw.language.trim() : "English";
+  const topic = typeof raw?.topic === "string" && raw.topic.trim() ? raw.topic.trim() : "Avatar G platform promo";
+  const mustInclude =
+    typeof raw?.mustInclude === "string" && raw.mustInclude.trim() ? raw.mustInclude.trim() : "";
+
+  const prompt = typeof raw?.prompt === "string" && raw.prompt.trim() ? raw.prompt.trim() : undefined;
+
+  const bpm = typeof raw?.bpm === "number" && Number.isFinite(raw.bpm) ? raw.bpm : undefined;
+
+  const voiceId = typeof raw?.voiceId === "string" && raw.voiceId.trim() ? raw.voiceId.trim() : undefined;
+
+  const responseMode =
+    raw?.responseMode === "minimal" || raw?.responseMode === "full" ? raw.responseMode : "full";
+
+  return { mood, genre, language, topic, mustInclude, prompt, bpm, voiceId, responseMode };
+}
+
+// -------- ElevenLabs (with timeout) --------
 async function elevenLabsTTS({
   apiKey,
   voiceId,
   text,
   modelId,
+  timeoutMs = 45000,
 }: {
   apiKey: string;
   voiceId: string;
   text: string;
   modelId?: string;
+  timeoutMs?: number;
 }) {
   const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(
     voiceId
   )}/stream?output_format=mp3_44100_128`;
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "xi-api-key": apiKey,
-      "content-type": "application/json",
-      accept: "audio/mpeg",
-    },
-    body: JSON.stringify({
-      text,
-      model_id: modelId ?? "eleven_multilingual_v2",
-      voice_settings: {
-        stability: 0.45,
-        similarity_boost: 0.8,
-        style: 0.35,
-        use_speaker_boost: true,
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "xi-api-key": apiKey,
+        "content-type": "application/json",
+        accept: "audio/mpeg",
       },
-    }),
-  });
+      body: JSON.stringify({
+        text,
+        model_id: modelId ?? "eleven_multilingual_v2",
+        voice_settings: {
+          stability: 0.45,
+          similarity_boost: 0.8,
+          style: 0.35,
+          use_speaker_boost: true,
+        },
+      }),
+    });
 
-  if (!res.ok) {
-    const msg = await res.text().catch(() => "");
-    throw new Error(`ElevenLabs TTS failed: ${res.status} ${msg}`);
+    if (!res.ok) {
+      const msg = await safeReadText(res);
+      throw new Error(`ElevenLabs TTS failed: ${res.status} ${msg}`.trim());
+    }
+
+    const arrayBuffer = await res.arrayBuffer();
+    return Buffer.from(arrayBuffer);
+  } catch (e: any) {
+    if (e?.name === "AbortError") {
+      throw new Error(`ElevenLabs TTS timeout after ${timeoutMs}ms`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(t);
   }
-
-  const arrayBuffer = await res.arrayBuffer();
-  return Buffer.from(arrayBuffer);
 }
 
 function buildSingableText(lyrics: string) {
@@ -88,7 +184,6 @@ function buildSingableText(lyrics: string) {
     .replace(/\*\*/g, "")
     .trim();
 
-  // pick chorus + verse1 if exists
   const chorusMatch = cleaned.match(/(chorus[:\s].*?)(\n\n|$)/is);
   const verseMatch = cleaned.match(/(verse\s*1[:\s].*?)(\n\n|$)/is);
 
@@ -103,15 +198,35 @@ function buildSingableText(lyrics: string) {
     .replace(/[.]/g, ". ")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 1100); // protect from too long TTS
+    .slice(0, 1100);
+}
+
+// -------- OpenAI (robust JSON parse) --------
+function tryParseJsonObject(s: string): any | null {
+  try {
+    return JSON.parse(s);
+  } catch {
+    // attempt to extract first {...} block
+    const start = s.indexOf("{");
+    const end = s.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      const sub = s.slice(start, end + 1);
+      try {
+        return JSON.parse(sub);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
 }
 
 async function generateLyricsWithOpenAI(input: {
-  mood?: string;
-  genre?: string;
-  language?: string;
-  topic?: string;
-  mustInclude?: string;
+  mood: string;
+  genre: string;
+  language: string;
+  topic: string;
+  mustInclude: string;
   userPrompt?: string;
   bpm?: number;
 }) {
@@ -120,22 +235,17 @@ async function generateLyricsWithOpenAI(input: {
 
   const client = new OpenAI({ apiKey });
 
-  const mood = input.mood ?? "Happy / festive";
-  const genre = input.genre ?? "Pop";
-  const language = input.language ?? "English";
-  const topic = input.topic ?? "Avatar G platform promo";
-  const mustInclude = input.mustInclude ?? "";
-  const bpm = input.bpm ?? 120;
+  const bpm = typeof input.bpm === "number" && Number.isFinite(input.bpm) ? input.bpm : 120;
 
   const prompt = `
-Write a SHORT-to-MEDIUM, catchy, modern song lyric for:
-- Mood: ${mood}
-- Genre: ${genre}
-- Language: ${language}
+Write a SHORT-to-MEDIUM, catchy, modern advertising song lyric for:
+- Mood: ${input.mood}
+- Genre: ${input.genre}
+- Language: ${input.language}
 - Tempo: ~${bpm} BPM
-- Topic: ${topic}
+- Topic: ${input.topic}
 
-Must include (if any): ${mustInclude || "(none)"}
+Must include (if any): ${input.mustInclude || "(none)"}
 
 Rules:
 - Clean and brand-safe (no explicit content).
@@ -147,52 +257,25 @@ Where "lyrics" contains labeled sections:
 Verse 1, Chorus, Verse 2, Bridge, Chorus, Outro.
 `.trim();
 
-  // Try strict JSON mode; fallback if library/model ever fails
-  let raw = "";
-  try {
-    const completion = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0.8,
-      messages: [
-        {
-          role: "system",
-          content: "You are a professional songwriter for brand-safe advertising music.",
-        },
-        {
-          role: "user",
-          content: input.userPrompt ? `${prompt}\nUser prompt: ${input.userPrompt}` : prompt,
-        },
-      ],
-      response_format: { type: "json_object" } as any,
-    });
+  const userContent = input.userPrompt ? `${prompt}\nUser prompt: ${input.userPrompt}` : prompt;
 
-    raw = completion.choices?.[0]?.message?.content ?? "{}";
-  } catch (e) {
-    const completion = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0.8,
-      messages: [
-        {
-          role: "system",
-          content:
-            "Return a JSON object with keys title, bpm, lyrics (with Verse/Chorus/Bridge labels). No extra text.",
-        },
-        {
-          role: "user",
-          content: input.userPrompt ? `${prompt}\nUser prompt: ${input.userPrompt}` : prompt,
-        },
-      ],
-    });
+  const completion = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0.8,
+    max_tokens: 700,
+    messages: [
+      {
+        role: "system",
+        content:
+          "You are a professional songwriter for brand-safe advertising music. Output strictly as JSON object only.",
+      },
+      { role: "user", content: userContent },
+    ],
+    response_format: { type: "json_object" } as any,
+  });
 
-    raw = completion.choices?.[0]?.message?.content ?? "{}";
-  }
-
-  let parsed: any;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    parsed = { title: "Avatar G Anthem", bpm, lyrics: raw };
-  }
+  const raw = completion.choices?.[0]?.message?.content ?? "{}";
+  const parsed = tryParseJsonObject(raw) ?? { title: "Avatar G Anthem", bpm, lyrics: raw };
 
   const title = String(parsed.title ?? "Avatar G Anthem").slice(0, 80);
   const outBpm = Number(parsed.bpm ?? bpm);
@@ -200,25 +283,16 @@ Verse 1, Chorus, Verse 2, Bridge, Chorus, Outro.
 
   if (!lyrics) throw new Error("OpenAI returned empty lyrics");
 
-  return { title, bpm: outBpm, lyrics };
+  return { title, bpm: Number.isFinite(outBpm) ? outBpm : bpm, lyrics };
 }
 
+// -------- Supabase --------
 function getSupabaseAdmin() {
   const url = process.env.SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !serviceKey) return null;
 
-  return createClient(url, serviceKey, {
-    auth: { persistSession: false },
-  });
-}
-
-function nowStamp() {
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(
-    now.getHours()
-  )}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  return createClient(url, serviceKey, { auth: { persistSession: false } });
 }
 
 // ---------------- Routes ----------------
@@ -231,28 +305,18 @@ export async function POST(req: NextRequest) {
   const origin = req.headers.get("origin") ?? "*";
 
   try {
-    const body = await req.json().catch(() => ({}));
-
-    const {
-      mood,
-      genre,
-      language,
-      topic,
-      mustInclude,
-      prompt: userPrompt,
-      bpm,
-      voiceId,
-    } = body ?? {};
+    const rawBody = await req.json().catch(() => ({}));
+    const body = normalizeBody(rawBody) as Required<GenerateBody> & { responseMode: "minimal" | "full" };
 
     // 1) Lyrics
-    const { title, lyrics, bpm: outBpm } = await generateLyricsWithOpenAI({
-      mood,
-      genre,
-      language,
-      topic,
-      mustInclude,
-      userPrompt,
-      bpm: typeof bpm === "number" ? bpm : undefined,
+    const { title, lyrics, bpm } = await generateLyricsWithOpenAI({
+      mood: body.mood,
+      genre: body.genre,
+      language: body.language,
+      topic: body.topic,
+      mustInclude: body.mustInclude,
+      userPrompt: body.prompt,
+      bpm: body.bpm,
     });
 
     // 2) ElevenLabs MP3
@@ -260,18 +324,20 @@ export async function POST(req: NextRequest) {
     if (!elevenKey) throw new Error("Missing ELEVENLABS_API_KEY");
 
     const defaultVoiceId = process.env.ELEVENLABS_VOICE_ID;
-    const selectedVoiceId = (voiceId && String(voiceId)) || defaultVoiceId;
+    const selectedVoiceId = (body.voiceId && String(body.voiceId)) || defaultVoiceId;
     if (!selectedVoiceId) throw new Error("Missing ELEVENLABS_VOICE_ID (or pass voiceId)");
 
     const ttsText = buildSingableText(lyrics);
+
     const vocalMp3 = await elevenLabsTTS({
       apiKey: elevenKey,
       voiceId: selectedVoiceId,
       text: ttsText,
       modelId: process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2",
+      timeoutMs: 45000,
     });
 
-    // 3) Upload to Supabase (optional but recommended)
+    // 3) Upload to Supabase (optional)
     const bucket = process.env.SUPABASE_STORAGE_BUCKET || "music";
     const supabase = getSupabaseAdmin();
 
@@ -279,12 +345,13 @@ export async function POST(req: NextRequest) {
     let storagePath: string | null = null;
 
     if (supabase) {
-      const base = safeFileName(`${title}-${language || "en"}-${genre || "pop"}-${nowStamp()}`);
+      const base = safeFileName(`${title}-${body.language}-${body.genre}-${nowStamp()}`);
       storagePath = `generated/${base}.mp3`;
 
       const up = await supabase.storage.from(bucket).upload(storagePath, vocalMp3, {
         contentType: "audio/mpeg",
         upsert: true,
+        cacheControl: "3600",
       });
 
       if (up.error) throw new Error(`Supabase upload failed: ${up.error.message}`);
@@ -293,38 +360,57 @@ export async function POST(req: NextRequest) {
       vocalUrl = pub.data.publicUrl ?? null;
     }
 
-    return json(
-      {
-        ok: true,
-        title,
-        bpm: outBpm,
-        lyrics, // full lyrics (for Suno-ready UI)
-        tts_text: ttsText, // what we used for ElevenLabs
-        voice: {
-          provider: "elevenlabs",
-          voiceId: selectedVoiceId,
-          url: vocalUrl, // null if supabase not configured
-          storagePath,
-          bytes: vocalMp3.length,
-          contentType: "audio/mpeg",
+    const note = supabase
+      ? "Vocal MP3 generated and uploaded to Supabase Storage."
+      : "Vocal MP3 generated but Supabase env missing; set SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY + SUPABASE_STORAGE_BUCKET.";
+
+    // ✅ Minimal vs Full
+    if (body.responseMode === "minimal") {
+      return json(
+        {
+          ok: true,
+          title,
+          bpm,
+          lyrics,
+          voice: {
+            provider: "elevenlabs",
+            voiceId: selectedVoiceId,
+            url: vocalUrl,
+          },
         },
-        note: supabase
-          ? "Vocal MP3 generated and uploaded to Supabase Storage."
-          : "Vocal MP3 generated but Supabase env missing; set SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY + SUPABASE_STORAGE_BUCKET.",
+        200,
+        corsHeaders(origin)
+      );
+    }
+
+    const response: OkResponse = {
+      ok: true,
+      title,
+      bpm,
+      lyrics,
+      tts_text: ttsText,
+      voice: {
+        provider: "elevenlabs",
+        voiceId: selectedVoiceId,
+        url: vocalUrl,
+        storagePath,
+        bytes: vocalMp3.length,
+        contentType: "audio/mpeg",
       },
-      200,
-      corsHeaders(origin)
-    );
+      note,
+    };
+
+    return json(response, 200, corsHeaders(origin));
   } catch (err: any) {
     console.error("❌ /api/music/generate ERROR", err);
 
-    return json(
-      {
-        ok: false,
-        error: String(err?.message ?? err),
-      },
-      500,
-      corsHeaders(origin)
-    );
+    const message = String(err?.message ?? err);
+    const payload: ErrResponse = {
+      ok: false,
+      error: message,
+      code: message.includes("timeout") ? "TTS_TIMEOUT" : "GENERIC_ERROR",
+    };
+
+    return json(payload, 500, corsHeaders(origin));
   }
 }
