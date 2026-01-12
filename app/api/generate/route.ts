@@ -2,69 +2,124 @@ import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic"; // avoid caching on Vercel
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+type Body = {
+  mood?: string;
+  genre?: string;
+  language?: string;
+  topic?: string;
+  mustInclude?: string;
+  bpm?: number;
+};
+
+function cleanStr(v: unknown, fallback: string, max = 120) {
+  if (typeof v !== "string") return fallback;
+  const s = v.trim();
+  return s ? s.slice(0, max) : fallback;
+}
+
+function cleanBpm(v: unknown, fallback = 120) {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  // keep in a sensible range
+  return Math.min(180, Math.max(60, Math.round(n)));
+}
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
+    if (!process.env.OPENAI_API_KEY) {
+      return NextResponse.json(
+        { success: false, error: "Missing OPENAI_API_KEY" },
+        { status: 500 }
+      );
+    }
 
-    const {
-      mood = "happy",
-      genre = "pop",
-      language = "English",
-      topic = "Avatar G promo",
-    } = body;
+    const raw: Body = await req.json().catch(() => ({} as Body));
+
+    const mood = cleanStr(raw.mood, "Happy / festive", 60);
+    const genre = cleanStr(raw.genre, "Pop", 60);
+    const language = cleanStr(raw.language, "English", 40);
+    const topic = cleanStr(raw.topic, "Avatar G promo", 120);
+    const mustInclude = cleanStr(raw.mustInclude, "", 160);
+    const bpm = cleanBpm(raw.bpm, 120);
 
     const prompt = `
-Write catchy, brand-safe song lyrics.
+Write SHORT-to-MEDIUM, catchy, modern advertising song lyrics.
 
 Mood: ${mood}
 Genre: ${genre}
 Language: ${language}
+Tempo: ~${bpm} BPM
 Topic: ${topic}
+Must include (optional): ${mustInclude || "(none)"}
 
-Structure:
-- Verse 1
-- Chorus
-- Verse 2
-- Chorus
-- Bridge
-- Final Chorus / Outro
+Structure (use labels exactly):
+Verse 1:
+Chorus:
+Verse 2:
+Bridge:
+Final Chorus / Outro:
 
 Rules:
-- Modern, upbeat, easy to sing
-- No explicit content
-- Clear memorable chorus
-- Suitable for AI vocal generation
-`;
+- Brand-safe, no explicit content.
+- Strong, memorable chorus with a clear CTA for Avatar G.
+- Simple words, easy to sing.
+- Avoid extra explanations. Output ONLY the lyrics with the section labels.
+`.trim();
 
-    const completion = await openai.chat.completions.create({
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+    const completion = await client.chat.completions.create({
       model: "gpt-4o-mini",
+      temperature: 0.8,
+      max_tokens: 650,
       messages: [
-        { role: "system", content: "You are a professional songwriter." },
+        {
+          role: "system",
+          content:
+            "You are a professional songwriter for brand-safe advertising music. Output only lyrics with section labels.",
+        },
         { role: "user", content: prompt },
       ],
-      temperature: 0.8,
     });
 
-    const lyrics = completion.choices[0]?.message?.content ?? "";
+    const lyrics = (completion.choices?.[0]?.message?.content ?? "").trim();
 
-    return NextResponse.json({
-      success: true,
-      lyrics,
-    });
+    if (!lyrics) {
+      return NextResponse.json(
+        { success: false, error: "OpenAI returned empty lyrics" },
+        { status: 502 }
+      );
+    }
+
+    return NextResponse.json(
+      {
+        success: true,
+        mood,
+        genre,
+        language,
+        topic,
+        bpm,
+        lyrics,
+      },
+      {
+        status: 200,
+        headers: {
+          "cache-control": "no-store",
+        },
+      }
+    );
   } catch (error: any) {
     console.error("Lyrics generate error:", error);
 
     return NextResponse.json(
       {
         success: false,
-        error: "Failed to generate lyrics",
+        error: String(error?.message ?? "Failed to generate lyrics"),
       },
-      { status: 500 }
+      { status: 500, headers: { "cache-control": "no-store" } }
     );
   }
 }
+```0
