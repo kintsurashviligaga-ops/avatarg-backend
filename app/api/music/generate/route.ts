@@ -121,4 +121,4 @@ Verse 1, Chorus, Verse 2, Bridge, Chorus, Outro.
       500
     );
   }
-                         }
+}
