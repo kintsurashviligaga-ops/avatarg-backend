@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type Step = "idle" | "composing" | "uploading" | "done" | "error";
 
@@ -24,7 +24,7 @@ async function safeReadJson<T = any>(res: Response): Promise<T | null> {
   }
 }
 
-// ✅ Base64 → Uint8Array (works for audio bytes)
+// ✅ Base64 → Uint8Array (for audio bytes)
 function base64ToUint8Array(b64: string) {
   const clean = b64.replace(/^data:.*;base64,/, "");
   const binary = atob(clean);
@@ -33,23 +33,30 @@ function base64ToUint8Array(b64: string) {
   return out;
 }
 
-// ✅ Critical fix: always convert Uint8Array (even SharedArrayBuffer-backed) to real ArrayBuffer
+// ✅ Critical: always convert Uint8Array (even SharedArrayBuffer-backed) to a real ArrayBuffer slice/copy
 function uint8ToArrayBuffer(u8: Uint8Array): ArrayBuffer {
-  if (u8.buffer instanceof ArrayBuffer) {
-    const start = u8.byteOffset;
-    const end = start + u8.byteLength;
-    return u8.buffer.slice(start, end);
+  // Most browsers give ArrayBuffer, but TS may treat as ArrayBufferLike
+  // We make a safe copy/slice to a real ArrayBuffer
+  const start = u8.byteOffset ?? 0;
+  const len = u8.byteLength ?? u8.length;
+
+  // If buffer supports slice, use it safely
+  const buf: any = u8.buffer;
+  if (buf && typeof buf.slice === "function") {
+    return buf.slice(start, start + len);
   }
-  // SharedArrayBuffer / ArrayBufferLike → copy into new ArrayBuffer
-  const copy = new Uint8Array(u8.byteLength);
+
+  // Fallback: copy into new ArrayBuffer
+  const copy = new Uint8Array(len);
   copy.set(u8);
   return copy.buffer;
 }
 
-// ✅ Normalize any "audio" shape into Blob
+// ✅ Normalize any "audio" shape into Blob (NO TS errors)
 function audioToBlob(audio: any, contentType = "audio/mpeg"): Blob {
   if (!audio) throw new Error("No audio returned");
 
+  // Already a Blob
   if (audio instanceof Blob) return audio;
 
   // ArrayBuffer
@@ -63,47 +70,42 @@ function audioToBlob(audio: any, contentType = "audio/mpeg"): Blob {
     return new Blob([ab], { type: contentType });
   }
 
-  // Base64 string
+  // Base64 string or URL
   if (typeof audio === "string") {
-    // maybe it's a URL
     if (audio.startsWith("http://") || audio.startsWith("https://")) {
-      throw new Error("AUDIO_URL"); // handled outside
+      // we handle URL fetch outside
+      throw new Error("AUDIO_URL");
     }
-    // base64
     const u8 = base64ToUint8Array(audio);
     const ab = uint8ToArrayBuffer(u8);
     return new Blob([ab], { type: contentType });
   }
 
-  // number[] (JSON array)
+  // number[] (JSON array of bytes)
   if (Array.isArray(audio) && audio.every((x) => typeof x === "number")) {
     const u8 = new Uint8Array(audio);
     const ab = uint8ToArrayBuffer(u8);
     return new Blob([ab], { type: contentType });
   }
 
-  // unknown fallback
+  // Unknown fallback (won't be playable, but prevents crash)
   return new Blob([String(audio)], { type: contentType });
 }
 
-type ComposeResponse =
-  | {
-      // common shapes
-      audio?: any;
-      audio_base64?: string;
-      contentType?: string;
-      filename?: string;
-      url?: string; // sometimes API returns url
-      audio_url?: string;
-    }
-  | any;
+type ComposeResponse = {
+  audio?: any;
+  audio_base64?: string;
+  contentType?: string;
+  filename?: string;
+  url?: string;
+  audio_url?: string;
+} & Record<string, any>;
 
 async function generateFinalSong(prompt: string): Promise<{
   blob: Blob;
   filename: string;
   contentType: string;
 }> {
-  // 1) COMPOSE
   const composeRes = await fetch("/api/music/compose", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -118,99 +120,124 @@ async function generateFinalSong(prompt: string): Promise<{
 
   if (!composeRes.ok) {
     const t = await safeReadText(composeRes);
-    throw new Error(`Compose failed: ${composeRes.status} ${t}`);
+    throw new Error(`Compose failed: ${composeRes.status}\n${t}`);
   }
 
-  const ct = composeRes.headers.get("content-type") || "";
-  let blob: Blob | null = null;
+  const ctHeader = composeRes.headers.get("content-type") || "";
   let contentType = "audio/mpeg";
   let filename = `avatar-g-${Date.now()}.mp3`;
 
-  // Case A: backend returns raw audio binary
-  if (!ct.includes("application/json")) {
+  // ✅ Case A: backend returns raw audio binary
+  if (!ctHeader.includes("application/json")) {
     const ab = await composeRes.arrayBuffer();
-    contentType = ct || "audio/mpeg";
-    blob = new Blob([ab], { type: contentType });
-    return { blob, filename, contentType };
+    contentType = ctHeader || "audio/mpeg";
+    return { blob: new Blob([ab], { type: contentType }), filename, contentType };
   }
 
-  // Case B: backend returns JSON
+  // ✅ Case B: backend returns JSON
   const data = (await safeReadJson<ComposeResponse>(composeRes)) || {};
   contentType = data.contentType || "audio/mpeg";
   filename = data.filename || filename;
 
-  // If backend gives URL
+  // ✅ If backend gives URL
   const url = data.url || data.audio_url;
   if (url && typeof url === "string") {
     const audioRes = await fetch(url);
     if (!audioRes.ok) {
       const t = await safeReadText(audioRes);
-      throw new Error(`Fetch audio URL failed: ${audioRes.status} ${t}`);
+      throw new Error(`Fetch audio URL failed: ${audioRes.status}\n${t}`);
     }
     const ab = await audioRes.arrayBuffer();
     const ct2 = audioRes.headers.get("content-type");
     contentType = ct2 || contentType;
-    blob = new Blob([ab], { type: contentType });
-    return { blob, filename, contentType };
+    return { blob: new Blob([ab], { type: contentType }), filename, contentType };
   }
 
-  // Try normal audio fields
+  // ✅ Try normal audio fields
   const audioAny = data.audio_base64 ?? data.audio ?? null;
 
   try {
-    blob = audioToBlob(audioAny, contentType);
+    const blob = audioToBlob(audioAny, contentType);
+    return { blob, filename, contentType };
   } catch (e: any) {
-    // audioToBlob threw AUDIO_URL marker
+    // URL marker
     if (String(e?.message) === "AUDIO_URL" && typeof audioAny === "string") {
       const audioRes = await fetch(audioAny);
+      if (!audioRes.ok) {
+        const t = await safeReadText(audioRes);
+        throw new Error(`Fetch audio URL failed: ${audioRes.status}\n${t}`);
+      }
       const ab = await audioRes.arrayBuffer();
       const ct2 = audioRes.headers.get("content-type");
       contentType = ct2 || contentType;
-      blob = new Blob([ab], { type: contentType });
-    } else {
-      throw e;
+      return { blob: new Blob([ab], { type: contentType }), filename, contentType };
     }
+    throw e;
   }
-
-  return { blob, filename, contentType };
 }
 
 export default function MusicPage() {
   const [prompt, setPrompt] = useState(
     "Georgian New Year vibe, upbeat pop, festive, 120bpm, joyful chorus"
   );
+
   const [step, setStep] = useState<Step>("idle");
   const [error, setError] = useState<string>("");
+
   const [audioUrl, setAudioUrl] = useState<string>("");
   const [publicUrl, setPublicUrl] = useState<string>("");
+  const [downloadName, setDownloadName] = useState<string>("");
 
-  const canGenerate = useMemo(() => prompt.trim().length >= 6 && step !== "composing" && step !== "uploading", [
-    prompt,
-    step,
-  ]);
+  // keep last object url to revoke
+  const lastObjectUrlRef = useRef<string>("");
+
+  useEffect(() => {
+    // cleanup on unmount
+    return () => {
+      if (lastObjectUrlRef.current) {
+        URL.revokeObjectURL(lastObjectUrlRef.current);
+        lastObjectUrlRef.current = "";
+      }
+    };
+  }, []);
+
+  const canGenerate = useMemo(() => {
+    const okPrompt = prompt.trim().length >= 6;
+    const busy = step === "composing" || step === "uploading";
+    return okPrompt && !busy;
+  }, [prompt, step]);
 
   async function onGenerate() {
     setError("");
     setPublicUrl("");
+
+    // revoke previous audio URL (avoid memory leak)
+    if (lastObjectUrlRef.current) {
+      URL.revokeObjectURL(lastObjectUrlRef.current);
+      lastObjectUrlRef.current = "";
+    }
     setAudioUrl("");
+    setDownloadName("");
 
     try {
       setStep("composing");
 
-      // 1) Generate audio blob
-      const { blob, filename, contentType } = await generateFinalSong(prompt.trim());
+      const p = prompt.trim();
+      const { blob, filename, contentType } = await generateFinalSong(p);
 
       // Local preview
       const localUrl = URL.createObjectURL(blob);
+      lastObjectUrlRef.current = localUrl;
       setAudioUrl(localUrl);
+      setDownloadName(filename || `avatar-g-${Date.now()}.mp3`);
 
-      // 2) Upload to your backend storage (optional but recommended)
+      // Upload (optional)
       setStep("uploading");
 
       const fd = new FormData();
-      fd.append("file", blob, filename);
+      fd.append("file", blob, filename || `avatar-g-${Date.now()}.mp3`);
       fd.append("contentType", contentType);
-      fd.append("prompt", prompt.trim());
+      fd.append("prompt", p);
 
       const uploadRes = await fetch("/api/music/upload", {
         method: "POST",
@@ -219,9 +246,8 @@ export default function MusicPage() {
 
       if (!uploadRes.ok) {
         const t = await safeReadText(uploadRes);
-        // Upload failed -> still allow local playback
         setStep("done");
-        setError(`Upload failed (but local preview works): ${uploadRes.status} ${t}`);
+        setError(`Upload failed (but local preview works): ${uploadRes.status}\n${t}`);
         return;
       }
 
@@ -288,7 +314,7 @@ export default function MusicPage() {
             {audioUrl && (
               <a
                 href={audioUrl}
-                download={`avatar-g-${Date.now()}.mp3`}
+                download={downloadName || `avatar-g-${Date.now()}.mp3`}
                 className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm hover:bg-white/10"
               >
                 Download (local)
@@ -323,4 +349,4 @@ export default function MusicPage() {
       </div>
     </div>
   );
-  }
+}
