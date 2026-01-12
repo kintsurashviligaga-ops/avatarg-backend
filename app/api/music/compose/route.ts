@@ -1,13 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 
+export const runtime = "edge";
+
+// ================= ENV =================
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY!;
 const ELEVENLABS_ENDPOINT =
   process.env.ELEVENLABS_ENDPOINT ??
   "https://api.elevenlabs.io/v1/text-to-speech";
-const ELEVENLABS_VOICE = process.env.ELEVENLABS_VOICE ?? "Rachel";
+const ELEVENLABS_VOICE = process.env.ELEVENLABS_VOICE!; // voice ID
 
-export const runtime = "edge";
-
+// ================= POST =================
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -20,9 +22,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (!ELEVENLABS_API_KEY) {
+    if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE) {
       return NextResponse.json(
-        { error: "ELEVENLABS_API_KEY not configured" },
+        { error: "ElevenLabs env vars missing" },
         { status: 500 }
       );
     }
@@ -38,7 +40,7 @@ export async function POST(req: NextRequest) {
         },
         body: JSON.stringify({
           text: prompt,
-          model_id: "eleven_monolingual_v1",
+          model_id: "eleven_multilingual_v2",
           voice_settings: {
             stability: 0.45,
             similarity_boost: 0.8,
@@ -65,6 +67,7 @@ export async function POST(req: NextRequest) {
       },
     });
   } catch (err: any) {
+    console.error("❌ compose error:", err);
     return NextResponse.json(
       { error: err?.message ?? "Unknown error" },
       { status: 500 }
