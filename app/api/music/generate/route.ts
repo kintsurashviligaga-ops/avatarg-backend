@@ -1,416 +1,115 @@
-import { NextRequest } from "next/server";
-import OpenAI from "openai";
-import { createClient } from "@supabase/supabase-js";
+"use client";
 
-export const runtime = "nodejs"; // required for Buffer / binary
+import { useMemo, useState } from "react";
 
-// ---------------- Types ----------------
-type GenerateBody = {
-  mood?: string;
-  genre?: string;
-  language?: string;
-  topic?: string;
-  mustInclude?: string;
-  prompt?: string; // userPrompt
-  bpm?: number;
-  voiceId?: string;
-  // optional response control
-  responseMode?: "minimal" | "full"; // default: "full"
-};
+type Step = "idle" | "loading" | "done" | "error";
 
-type OkResponse = {
-  ok: true;
-  title: string;
-  bpm: number;
-  lyrics: string;
-  tts_text: string;
-  voice: {
-    provider: "elevenlabs";
-    voiceId: string;
-    url: string | null;
-    storagePath: string | null;
-    bytes: number;
-    contentType: "audio/mpeg";
-  };
-  note: string;
-};
+export default function MusicPage() {
+  const [prompt, setPrompt] = useState(
+    "Georgian New Year vibe, upbeat pop, festive, joyful chorus"
+  );
+  const [step, setStep] = useState<Step>("idle");
+  const [error, setError] = useState("");
+  const [lyrics, setLyrics] = useState("");
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
 
-type ErrResponse = {
-  ok: false;
-  error: string;
-  code?: string;
-};
+  const canGenerate = useMemo(
+    () => prompt.trim().length > 5 && step !== "loading",
+    [prompt, step]
+  );
 
-// ---------------- Helpers ----------------
-function json(data: any, status = 200, extraHeaders: Record<string, string> = {}) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store",
-      ...extraHeaders,
-    },
-  });
-}
+  async function onGenerate() {
+    setError("");
+    setLyrics("");
+    setAudioUrl(null);
 
-function corsHeaders(origin?: string) {
-  const allowlist = (process.env.CORS_ALLOWLIST ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+    try {
+      setStep("loading");
 
-  let o = origin ?? "*";
-  if (allowlist.length > 0) {
-    o = origin && allowlist.includes(origin) ? origin : allowlist[0];
-  }
-
-  return {
-    "access-control-allow-origin": o,
-    "access-control-allow-methods": "POST,OPTIONS",
-    "access-control-allow-headers": "content-type, authorization",
-    "access-control-max-age": "86400",
-    "vary": "Origin",
-  };
-}
-
-function safeFileName(s: string) {
-  return String(s || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9-_]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 60);
-}
-
-function nowStamp() {
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(
-    now.getHours()
-  )}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-}
-
-async function safeReadText(res: Response) {
-  try {
-    return await res.text();
-  } catch {
-    return "";
-  }
-}
-
-function normalizeBody(raw: any): Required<Pick<GenerateBody, "mood" | "genre" | "language" | "topic" | "mustInclude">> &
-  Pick<GenerateBody, "prompt" | "bpm" | "voiceId" | "responseMode"> {
-  const mood = typeof raw?.mood === "string" && raw.mood.trim() ? raw.mood.trim() : "Happy / festive";
-  const genre = typeof raw?.genre === "string" && raw.genre.trim() ? raw.genre.trim() : "Pop";
-  const language = typeof raw?.language === "string" && raw.language.trim() ? raw.language.trim() : "English";
-  const topic = typeof raw?.topic === "string" && raw.topic.trim() ? raw.topic.trim() : "Avatar G platform promo";
-  const mustInclude =
-    typeof raw?.mustInclude === "string" && raw.mustInclude.trim() ? raw.mustInclude.trim() : "";
-
-  const prompt = typeof raw?.prompt === "string" && raw.prompt.trim() ? raw.prompt.trim() : undefined;
-
-  const bpm = typeof raw?.bpm === "number" && Number.isFinite(raw.bpm) ? raw.bpm : undefined;
-
-  const voiceId = typeof raw?.voiceId === "string" && raw.voiceId.trim() ? raw.voiceId.trim() : undefined;
-
-  const responseMode =
-    raw?.responseMode === "minimal" || raw?.responseMode === "full" ? raw.responseMode : "full";
-
-  return { mood, genre, language, topic, mustInclude, prompt, bpm, voiceId, responseMode };
-}
-
-// -------- ElevenLabs (with timeout) --------
-async function elevenLabsTTS({
-  apiKey,
-  voiceId,
-  text,
-  modelId,
-  timeoutMs = 45000,
-}: {
-  apiKey: string;
-  voiceId: string;
-  text: string;
-  modelId?: string;
-  timeoutMs?: number;
-}) {
-  const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(
-    voiceId
-  )}/stream?output_format=mp3_44100_128`;
-
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        "xi-api-key": apiKey,
-        "content-type": "application/json",
-        accept: "audio/mpeg",
-      },
-      body: JSON.stringify({
-        text,
-        model_id: modelId ?? "eleven_multilingual_v2",
-        voice_settings: {
-          stability: 0.45,
-          similarity_boost: 0.8,
-          style: 0.35,
-          use_speaker_boost: true,
-        },
-      }),
-    });
-
-    if (!res.ok) {
-      const msg = await safeReadText(res);
-      throw new Error(`ElevenLabs TTS failed: ${res.status} ${msg}`.trim());
-    }
-
-    const arrayBuffer = await res.arrayBuffer();
-    return Buffer.from(arrayBuffer);
-  } catch (e: any) {
-    if (e?.name === "AbortError") {
-      throw new Error(`ElevenLabs TTS timeout after ${timeoutMs}ms`);
-    }
-    throw e;
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-function buildSingableText(lyrics: string) {
-  const cleaned = String(lyrics || "")
-    .replace(/\r/g, "")
-    .replace(/\*\*/g, "")
-    .trim();
-
-  const chorusMatch = cleaned.match(/(chorus[:\s].*?)(\n\n|$)/is);
-  const verseMatch = cleaned.match(/(verse\s*1[:\s].*?)(\n\n|$)/is);
-
-  const parts: string[] = [];
-  if (chorusMatch?.[1]) parts.push(chorusMatch[1]);
-  if (verseMatch?.[1]) parts.push(verseMatch[1]);
-
-  const text = parts.length > 0 ? parts.join("\n\n") : cleaned.slice(0, 900);
-
-  return text
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/[.]/g, ". ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 1100);
-}
-
-// -------- OpenAI (robust JSON parse) --------
-function tryParseJsonObject(s: string): any | null {
-  try {
-    return JSON.parse(s);
-  } catch {
-    // attempt to extract first {...} block
-    const start = s.indexOf("{");
-    const end = s.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      const sub = s.slice(start, end + 1);
-      try {
-        return JSON.parse(sub);
-      } catch {
-        return null;
-      }
-    }
-    return null;
-  }
-}
-
-async function generateLyricsWithOpenAI(input: {
-  mood: string;
-  genre: string;
-  language: string;
-  topic: string;
-  mustInclude: string;
-  userPrompt?: string;
-  bpm?: number;
-}) {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("Missing OPENAI_API_KEY");
-
-  const client = new OpenAI({ apiKey });
-
-  const bpm = typeof input.bpm === "number" && Number.isFinite(input.bpm) ? input.bpm : 120;
-
-  const prompt = `
-Write a SHORT-to-MEDIUM, catchy, modern advertising song lyric for:
-- Mood: ${input.mood}
-- Genre: ${input.genre}
-- Language: ${input.language}
-- Tempo: ~${bpm} BPM
-- Topic: ${input.topic}
-
-Must include (if any): ${input.mustInclude || "(none)"}
-
-Rules:
-- Clean and brand-safe (no explicit content).
-- Strong, memorable chorus.
-- Simple words, easy to sing.
-- Clear CTA about Avatar G (AI media factory for business).
-Return JSON ONLY with keys: "title", "bpm", "lyrics".
-Where "lyrics" contains labeled sections:
-Verse 1, Chorus, Verse 2, Bridge, Chorus, Outro.
-`.trim();
-
-  const userContent = input.userPrompt ? `${prompt}\nUser prompt: ${input.userPrompt}` : prompt;
-
-  const completion = await client.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature: 0.8,
-    max_tokens: 700,
-    messages: [
-      {
-        role: "system",
-        content:
-          "You are a professional songwriter for brand-safe advertising music. Output strictly as JSON object only.",
-      },
-      { role: "user", content: userContent },
-    ],
-    response_format: { type: "json_object" } as any,
-  });
-
-  const raw = completion.choices?.[0]?.message?.content ?? "{}";
-  const parsed = tryParseJsonObject(raw) ?? { title: "Avatar G Anthem", bpm, lyrics: raw };
-
-  const title = String(parsed.title ?? "Avatar G Anthem").slice(0, 80);
-  const outBpm = Number(parsed.bpm ?? bpm);
-  const lyrics = String(parsed.lyrics ?? "").trim();
-
-  if (!lyrics) throw new Error("OpenAI returned empty lyrics");
-
-  return { title, bpm: Number.isFinite(outBpm) ? outBpm : bpm, lyrics };
-}
-
-// -------- Supabase --------
-function getSupabaseAdmin() {
-  const url = process.env.SUPABASE_URL;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !serviceKey) return null;
-
-  return createClient(url, serviceKey, { auth: { persistSession: false } });
-}
-
-// ---------------- Routes ----------------
-export async function OPTIONS(req: NextRequest) {
-  const origin = req.headers.get("origin") ?? "*";
-  return new Response(null, { status: 204, headers: corsHeaders(origin) });
-}
-
-export async function POST(req: NextRequest) {
-  const origin = req.headers.get("origin") ?? "*";
-
-  try {
-    const rawBody = await req.json().catch(() => ({}));
-    const body = normalizeBody(rawBody) as Required<GenerateBody> & { responseMode: "minimal" | "full" };
-
-    // 1) Lyrics
-    const { title, lyrics, bpm } = await generateLyricsWithOpenAI({
-      mood: body.mood,
-      genre: body.genre,
-      language: body.language,
-      topic: body.topic,
-      mustInclude: body.mustInclude,
-      userPrompt: body.prompt,
-      bpm: body.bpm,
-    });
-
-    // 2) ElevenLabs MP3
-    const elevenKey = process.env.ELEVENLABS_API_KEY;
-    if (!elevenKey) throw new Error("Missing ELEVENLABS_API_KEY");
-
-    const defaultVoiceId = process.env.ELEVENLABS_VOICE_ID;
-    const selectedVoiceId = (body.voiceId && String(body.voiceId)) || defaultVoiceId;
-    if (!selectedVoiceId) throw new Error("Missing ELEVENLABS_VOICE_ID (or pass voiceId)");
-
-    const ttsText = buildSingableText(lyrics);
-
-    const vocalMp3 = await elevenLabsTTS({
-      apiKey: elevenKey,
-      voiceId: selectedVoiceId,
-      text: ttsText,
-      modelId: process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2",
-      timeoutMs: 45000,
-    });
-
-    // 3) Upload to Supabase (optional)
-    const bucket = process.env.SUPABASE_STORAGE_BUCKET || "music";
-    const supabase = getSupabaseAdmin();
-
-    let vocalUrl: string | null = null;
-    let storagePath: string | null = null;
-
-    if (supabase) {
-      const base = safeFileName(`${title}-${body.language}-${body.genre}-${nowStamp()}`);
-      storagePath = `generated/${base}.mp3`;
-
-      const up = await supabase.storage.from(bucket).upload(storagePath, vocalMp3, {
-        contentType: "audio/mpeg",
-        upsert: true,
-        cacheControl: "3600",
+      const res = await fetch("/api/music/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt,
+          responseMode: "minimal", // 👈 სუფთა პასუხი, ზედმეტი JSON-ის გარეშე
+        }),
       });
 
-      if (up.error) throw new Error(`Supabase upload failed: ${up.error.message}`);
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || "Request failed");
+      }
 
-      const pub = supabase.storage.from(bucket).getPublicUrl(storagePath);
-      vocalUrl = pub.data.publicUrl ?? null;
+      const data = await res.json();
+
+      if (!data.ok) {
+        throw new Error(data.error || "Generation failed");
+      }
+
+      setLyrics(data.lyrics || "");
+
+      // ✅ აქ ვმუშაობთ მხოლოდ URL-ზე — NO Uint8Array, NO Blob hacks
+      if (data.voice?.url) {
+        setAudioUrl(data.voice.url);
+      }
+
+      setStep("done");
+    } catch (e: any) {
+      setError(e?.message ?? "Unknown error");
+      setStep("error");
     }
-
-    const note = supabase
-      ? "Vocal MP3 generated and uploaded to Supabase Storage."
-      : "Vocal MP3 generated but Supabase env missing; set SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY + SUPABASE_STORAGE_BUCKET.";
-
-    // ✅ Minimal vs Full
-    if (body.responseMode === "minimal") {
-      return json(
-        {
-          ok: true,
-          title,
-          bpm,
-          lyrics,
-          voice: {
-            provider: "elevenlabs",
-            voiceId: selectedVoiceId,
-            url: vocalUrl,
-          },
-        },
-        200,
-        corsHeaders(origin)
-      );
-    }
-
-    const response: OkResponse = {
-      ok: true,
-      title,
-      bpm,
-      lyrics,
-      tts_text: ttsText,
-      voice: {
-        provider: "elevenlabs",
-        voiceId: selectedVoiceId,
-        url: vocalUrl,
-        storagePath,
-        bytes: vocalMp3.length,
-        contentType: "audio/mpeg",
-      },
-      note,
-    };
-
-    return json(response, 200, corsHeaders(origin));
-  } catch (err: any) {
-    console.error("❌ /api/music/generate ERROR", err);
-
-    const message = String(err?.message ?? err);
-    const payload: ErrResponse = {
-      ok: false,
-      error: message,
-      code: message.includes("timeout") ? "TTS_TIMEOUT" : "GENERIC_ERROR",
-    };
-
-    return json(payload, 500, corsHeaders(origin));
   }
-}
+
+  return (
+    <div className="min-h-screen bg-[#0b1220] text-white p-6">
+      <div className="max-w-3xl mx-auto space-y-6">
+        <h1 className="text-xl font-semibold">🎵 Avatar G Music Generator</h1>
+
+        <textarea
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          rows={4}
+          className="w-full rounded-xl bg-black/40 border border-white/10 p-3 text-sm"
+          placeholder="Describe your song idea..."
+        />
+
+        <button
+          disabled={!canGenerate}
+          onClick={onGenerate}
+          className={`px-4 py-2 rounded-xl text-sm font-medium ${
+            canGenerate
+              ? "bg-cyan-500 text-black hover:bg-cyan-400"
+              : "bg-white/10 text-white/40 cursor-not-allowed"
+          }`}
+        >
+          {step === "loading" ? "Generating…" : "Generate"}
+        </button>
+
+        {error && (
+          <div className="rounded-xl bg-red-500/10 border border-red-400/20 p-3 text-sm text-red-200">
+            {error}
+          </div>
+        )}
+
+        {lyrics && (
+          <div className="rounded-xl bg-black/30 border border-white/10 p-4 whitespace-pre-wrap text-sm">
+            {lyrics}
+          </div>
+        )}
+
+        {audioUrl && (
+          <div className="rounded-xl bg-black/30 border border-white/10 p-4">
+            <audio controls className="w-full" src={audioUrl} />
+            <a
+              href={audioUrl}
+              download
+              className="inline-block mt-2 text-xs text-cyan-300 hover:underline"
+            >
+              Download MP3
+            </a>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+                }
