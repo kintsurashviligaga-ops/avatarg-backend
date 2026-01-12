@@ -4,82 +4,121 @@ import OpenAI from "openai";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+type Body = {
+  mood?: string;
+  genre?: string;
+  language?: string;
+  topic?: string;
+  mustInclude?: string;
+  bpm?: number;
+};
+
+function pickStr(v: unknown, fallback: string) {
+  return typeof v === "string" && v.trim() ? v.trim() : fallback;
+}
+
+function pickNum(v: unknown, fallback: number) {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function safeJson(data: unknown, status = 200) {
+  return NextResponse.json(data, {
+    status,
+    headers: {
+      "cache-control": "no-store",
+      "content-type": "application/json; charset=utf-8",
+    },
+  });
+}
+
+function tryParseJsonObject(s: string): any | null {
+  try {
+    return JSON.parse(s);
+  } catch {
+    const start = s.indexOf("{");
+    const end = s.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(s.slice(start, end + 1));
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
 
 export async function POST(req: NextRequest) {
   try {
     if (!process.env.OPENAI_API_KEY) {
-      return NextResponse.json(
-        { ok: false, error: "Missing OPENAI_API_KEY" },
-        { status: 500 }
-      );
+      return safeJson({ ok: false, error: "Missing OPENAI_API_KEY" }, 500);
     }
 
-    const body = await req.json().catch(() => ({}));
+    const bodyRaw = (await req.json().catch(() => ({}))) as Body;
 
-    const mood = body.mood || "Happy / festive";
-    const genre = body.genre || "Pop";
-    const language = body.language || "English";
-    const topic = body.topic || "Avatar G promo";
-    const bpm = Number(body.bpm) || 120;
-    const mustInclude = body.mustInclude || "";
+    const mood = pickStr(bodyRaw.mood, "Happy / festive");
+    const genre = pickStr(bodyRaw.genre, "Pop");
+    const language = pickStr(bodyRaw.language, "English");
+    const topic = pickStr(bodyRaw.topic, "Avatar G platform promo");
+    const mustInclude = pickStr(bodyRaw.mustInclude, "");
+    const bpm = pickNum(bodyRaw.bpm, 120);
 
     const prompt = `
-Write catchy, brand-safe advertising song lyrics.
+Write a SHORT-to-MEDIUM, catchy, brand-safe advertising song lyric.
 
 Mood: ${mood}
 Genre: ${genre}
 Language: ${language}
 Tempo: ~${bpm} BPM
 Topic: ${topic}
-Must include: ${mustInclude}
-
-Structure:
-- Verse 1
-- Chorus
-- Verse 2
-- Chorus
-- Bridge
-- Final Chorus / Outro
+Must include: ${mustInclude || "(none)"}
 
 Rules:
-- Modern, upbeat, easy to sing
-- No explicit content
-- Clear memorable chorus
-- Suitable for AI vocal generation
-`;
+- No explicit content, clean & brand-safe.
+- Strong, memorable chorus.
+- Simple words, easy to sing.
+- Clear CTA about Avatar G (AI media factory for business).
 
-    const completion = await openai.chat.completions.create({
+Return JSON ONLY with keys: "title", "bpm", "lyrics".
+Lyrics must include labeled sections:
+Verse 1, Chorus, Verse 2, Bridge, Chorus, Outro.
+`.trim();
+
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+    const completion = await client.chat.completions.create({
       model: "gpt-4o-mini",
+      temperature: 0.8,
+      max_tokens: 750,
       messages: [
-        { role: "system", content: "You are a professional songwriter." },
+        {
+          role: "system",
+          content:
+            "You are a professional songwriter for brand-safe advertising music. Output strictly as a JSON object only.",
+        },
         { role: "user", content: prompt },
       ],
-      temperature: 0.8,
+      response_format: { type: "json_object" } as any,
     });
 
-    const lyrics = completion.choices[0]?.message?.content ?? "";
+    const raw = completion.choices?.[0]?.message?.content ?? "{}";
+    const parsed = tryParseJsonObject(raw);
 
-    return NextResponse.json({
-      ok: true,
-      title: `${topic} (${genre})`,
-      bpm,
-      lyrics,
-      voice: {
-        provider: "elevenlabs",
-        voiceId: "default",
-        url: null,
-      },
-      note: "Lyrics generated successfully",
-    });
-  } catch (error) {
-    console.error("Music generate error:", error);
+    const title = String(parsed?.title ?? "Avatar G Anthem").slice(0, 80);
+    const outBpm = pickNum(parsed?.bpm, bpm);
+    const lyrics = String(parsed?.lyrics ?? "").trim();
 
-    return NextResponse.json(
-      { ok: false, error: "Failed to generate music lyrics" },
-      { status: 500 }
+    if (!lyrics) {
+      return safeJson({ ok: false, error: "OpenAI returned empty lyrics" }, 500);
+    }
+
+    return safeJson({ ok: true, title, bpm: outBpm, lyrics }, 200);
+  } catch (err: any) {
+    console.error("❌ /api/music/generate error:", err);
+    return safeJson(
+      { ok: false, error: String(err?.message ?? err ?? "Unknown error") },
+      500
     );
   }
-}
+                         }
