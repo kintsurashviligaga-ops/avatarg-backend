@@ -24,7 +24,7 @@ async function safeReadJson<T = any>(res: Response): Promise<T | null> {
   }
 }
 
-// ✅ Base64 → Uint8Array (for audio bytes)
+// Base64 → Uint8Array
 function base64ToUint8Array(b64: string) {
   const clean = b64.replace(/^data:.*;base64,/, "");
   const binary = atob(clean);
@@ -35,28 +35,28 @@ function base64ToUint8Array(b64: string) {
 
 /**
  * ✅ CRITICAL FIX:
- * Always convert Uint8Array (even SharedArrayBuffer-backed) into a REAL ArrayBuffer copy.
- * This avoids TS + runtime issues on Vercel/Next strict builds.
+ * Always produce a REAL ArrayBuffer (not ArrayBufferLike / SharedArrayBuffer)
  */
 function uint8ToSafeArrayBuffer(u8: Uint8Array): ArrayBuffer {
   const copy = new Uint8Array(u8.byteLength);
   copy.set(u8);
-  return copy.buffer;
+  return copy.buffer; // <- always real ArrayBuffer
 }
 
-// ✅ Normalize any "audio" shape into Blob (build-safe)
+/**
+ * ✅ Normalize any backend "audio" into Blob safely
+ * Supports: Blob, ArrayBuffer, Uint8Array, base64 string, number[]
+ * If string is URL -> throws "AUDIO_URL" marker
+ */
 function audioToBlobSafe(audio: any, contentType = "audio/mpeg"): Blob {
   if (!audio) throw new Error("No audio returned");
 
-  // Already a Blob
   if (audio instanceof Blob) return audio;
 
-  // ArrayBuffer
   if (audio instanceof ArrayBuffer) {
     return new Blob([audio], { type: contentType });
   }
 
-  // Uint8Array  ✅ (always convert to REAL ArrayBuffer)
   if (audio instanceof Uint8Array) {
     const ab = uint8ToSafeArrayBuffer(audio);
     return new Blob([ab], { type: contentType });
@@ -65,7 +65,6 @@ function audioToBlobSafe(audio: any, contentType = "audio/mpeg"): Blob {
   // Base64 string or URL
   if (typeof audio === "string") {
     if (audio.startsWith("http://") || audio.startsWith("https://")) {
-      // handled outside
       throw new Error("AUDIO_URL");
     }
     const u8 = base64ToUint8Array(audio);
@@ -118,19 +117,23 @@ async function generateFinalSong(prompt: string): Promise<{
   let contentType = "audio/mpeg";
   let filename = `avatar-g-${Date.now()}.mp3`;
 
-  // ✅ Case A: backend returns raw audio binary
+  // Case A: backend returns raw audio binary
   if (!ctHeader.includes("application/json")) {
     const ab = await composeRes.arrayBuffer();
     contentType = ctHeader || "audio/mpeg";
-    return { blob: new Blob([ab], { type: contentType }), filename, contentType };
+    return {
+      blob: new Blob([ab], { type: contentType }),
+      filename,
+      contentType,
+    };
   }
 
-  // ✅ Case B: backend returns JSON
+  // Case B: backend returns JSON
   const data = (await safeReadJson<ComposeResponse>(composeRes)) || {};
   contentType = data.contentType || "audio/mpeg";
   filename = data.filename || filename;
 
-  // ✅ If backend gives URL
+  // If backend gives URL
   const url = data.url || data.audio_url;
   if (url && typeof url === "string") {
     const audioRes = await fetch(url);
@@ -141,17 +144,21 @@ async function generateFinalSong(prompt: string): Promise<{
     const ab = await audioRes.arrayBuffer();
     const ct2 = audioRes.headers.get("content-type");
     contentType = ct2 || contentType;
-    return { blob: new Blob([ab], { type: contentType }), filename, contentType };
+    return {
+      blob: new Blob([ab], { type: contentType }),
+      filename,
+      contentType,
+    };
   }
 
-  // ✅ Try normal audio fields
+  // Try normal audio fields
   const audioAny = data.audio_base64 ?? data.audio ?? null;
 
   try {
     const blob = audioToBlobSafe(audioAny, contentType);
     return { blob, filename, contentType };
   } catch (e: any) {
-    // URL marker
+    // URL marker fallback
     if (String(e?.message) === "AUDIO_URL" && typeof audioAny === "string") {
       const audioRes = await fetch(audioAny);
       if (!audioRes.ok) {
@@ -161,7 +168,11 @@ async function generateFinalSong(prompt: string): Promise<{
       const ab = await audioRes.arrayBuffer();
       const ct2 = audioRes.headers.get("content-type");
       contentType = ct2 || contentType;
-      return { blob: new Blob([ab], { type: contentType }), filename, contentType };
+      return {
+        blob: new Blob([ab], { type: contentType }),
+        filename,
+        contentType,
+      };
     }
     throw e;
   }
@@ -233,7 +244,9 @@ export default function MusicPage() {
       if (!uploadRes.ok) {
         const t = await safeReadText(uploadRes);
         setStep("done");
-        setError(`Upload failed (but local preview works): ${uploadRes.status}\n${t}`);
+        setError(
+          `Upload failed (but local preview works): ${uploadRes.status}\n${t}`
+        );
         return;
       }
 
@@ -253,7 +266,9 @@ export default function MusicPage() {
       <div className="mx-auto max-w-3xl p-4 sm:p-6">
         <div className="rounded-2xl border border-white/10 bg-white/5 p-4 sm:p-6 shadow-lg">
           <div className="flex items-center justify-between gap-3">
-            <h1 className="text-lg sm:text-xl font-semibold">🎶 Music Generator</h1>
+            <h1 className="text-lg sm:text-xl font-semibold">
+              🎶 Music Generator
+            </h1>
             <span
               className={cx(
                 "text-xs px-2 py-1 rounded-full border",
@@ -269,7 +284,8 @@ export default function MusicPage() {
           </div>
 
           <p className="mt-2 text-sm text-white/70">
-            Prompt ჩაწერე და Generate. შემდეგ ფაილი აიტვირთება /api/music/upload-ზე (თუ upload route მუშაობს).
+            Prompt ჩაწერე და Generate. შემდეგ ფაილი აიტვირთება /api/music/upload-ზე
+            (თუ upload route მუშაობს).
           </p>
 
           <div className="mt-4">
@@ -335,4 +351,4 @@ export default function MusicPage() {
       </div>
     </div>
   );
-    }
+  }
