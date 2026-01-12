@@ -33,27 +33,19 @@ function base64ToUint8Array(b64: string) {
   return out;
 }
 
-// ✅ Critical: always convert Uint8Array (even SharedArrayBuffer-backed) to a real ArrayBuffer slice/copy
-function uint8ToArrayBuffer(u8: Uint8Array): ArrayBuffer {
-  // Most browsers give ArrayBuffer, but TS may treat as ArrayBufferLike
-  // We make a safe copy/slice to a real ArrayBuffer
-  const start = u8.byteOffset ?? 0;
-  const len = u8.byteLength ?? u8.length;
-
-  // If buffer supports slice, use it safely
-  const buf: any = u8.buffer;
-  if (buf && typeof buf.slice === "function") {
-    return buf.slice(start, start + len);
-  }
-
-  // Fallback: copy into new ArrayBuffer
-  const copy = new Uint8Array(len);
+/**
+ * ✅ CRITICAL FIX:
+ * Always convert Uint8Array (even SharedArrayBuffer-backed) into a REAL ArrayBuffer copy.
+ * This avoids TS + runtime issues on Vercel/Next strict builds.
+ */
+function uint8ToSafeArrayBuffer(u8: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(u8.byteLength);
   copy.set(u8);
   return copy.buffer;
 }
 
-// ✅ Normalize any "audio" shape into Blob (NO TS errors)
-function audioToBlob(audio: any, contentType = "audio/mpeg"): Blob {
+// ✅ Normalize any "audio" shape into Blob (build-safe)
+function audioToBlobSafe(audio: any, contentType = "audio/mpeg"): Blob {
   if (!audio) throw new Error("No audio returned");
 
   // Already a Blob
@@ -64,32 +56,31 @@ function audioToBlob(audio: any, contentType = "audio/mpeg"): Blob {
     return new Blob([audio], { type: contentType });
   }
 
-  // Uint8Array
+  // Uint8Array  ✅ (always convert to REAL ArrayBuffer)
   if (audio instanceof Uint8Array) {
-    const ab = uint8ToArrayBuffer(audio);
+    const ab = uint8ToSafeArrayBuffer(audio);
     return new Blob([ab], { type: contentType });
   }
 
   // Base64 string or URL
   if (typeof audio === "string") {
     if (audio.startsWith("http://") || audio.startsWith("https://")) {
-      // we handle URL fetch outside
+      // handled outside
       throw new Error("AUDIO_URL");
     }
     const u8 = base64ToUint8Array(audio);
-    const ab = uint8ToArrayBuffer(u8);
+    const ab = uint8ToSafeArrayBuffer(u8);
     return new Blob([ab], { type: contentType });
   }
 
   // number[] (JSON array of bytes)
   if (Array.isArray(audio) && audio.every((x) => typeof x === "number")) {
     const u8 = new Uint8Array(audio);
-    const ab = uint8ToArrayBuffer(u8);
+    const ab = uint8ToSafeArrayBuffer(u8);
     return new Blob([ab], { type: contentType });
   }
 
-  // Unknown fallback (won't be playable, but prevents crash)
-  return new Blob([String(audio)], { type: contentType });
+  throw new Error("Unsupported audio format");
 }
 
 type ComposeResponse = {
@@ -157,7 +148,7 @@ async function generateFinalSong(prompt: string): Promise<{
   const audioAny = data.audio_base64 ?? data.audio ?? null;
 
   try {
-    const blob = audioToBlob(audioAny, contentType);
+    const blob = audioToBlobSafe(audioAny, contentType);
     return { blob, filename, contentType };
   } catch (e: any) {
     // URL marker
@@ -188,11 +179,9 @@ export default function MusicPage() {
   const [publicUrl, setPublicUrl] = useState<string>("");
   const [downloadName, setDownloadName] = useState<string>("");
 
-  // keep last object url to revoke
   const lastObjectUrlRef = useRef<string>("");
 
   useEffect(() => {
-    // cleanup on unmount
     return () => {
       if (lastObjectUrlRef.current) {
         URL.revokeObjectURL(lastObjectUrlRef.current);
@@ -211,7 +200,6 @@ export default function MusicPage() {
     setError("");
     setPublicUrl("");
 
-    // revoke previous audio URL (avoid memory leak)
     if (lastObjectUrlRef.current) {
       URL.revokeObjectURL(lastObjectUrlRef.current);
       lastObjectUrlRef.current = "";
@@ -225,13 +213,11 @@ export default function MusicPage() {
       const p = prompt.trim();
       const { blob, filename, contentType } = await generateFinalSong(p);
 
-      // Local preview
       const localUrl = URL.createObjectURL(blob);
       lastObjectUrlRef.current = localUrl;
       setAudioUrl(localUrl);
       setDownloadName(filename || `avatar-g-${Date.now()}.mp3`);
 
-      // Upload (optional)
       setStep("uploading");
 
       const fd = new FormData();
@@ -349,4 +335,4 @@ export default function MusicPage() {
       </div>
     </div>
   );
-}
+    }
