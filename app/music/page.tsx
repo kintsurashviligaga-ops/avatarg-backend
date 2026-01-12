@@ -21,6 +21,24 @@ function base64ToUint8Array(base64: string) {
   return bytes;
 }
 
+/**
+ * ✅ Critical: always convert Uint8Array (even SharedArrayBuffer-backed)
+ * into a real ArrayBuffer slice/copy so Blob() never fails TS build.
+ */
+function uint8ToSafeArrayBuffer(u8: Uint8Array): ArrayBuffer {
+  const start = u8.byteOffset ?? 0;
+  const len = u8.byteLength ?? u8.length;
+
+  const buf: any = u8.buffer;
+  if (buf && typeof buf.slice === "function") {
+    return buf.slice(start, start + len);
+  }
+
+  const copy = new Uint8Array(len);
+  copy.set(u8);
+  return copy.buffer;
+}
+
 async function uploadToR2(
   audio: ArrayBuffer | Uint8Array | Blob,
   contentType = "audio/mpeg",
@@ -31,8 +49,10 @@ async function uploadToR2(
   if (audio instanceof Blob) {
     body = audio;
   } else if (audio instanceof Uint8Array) {
-    body = new Blob([audio], { type: contentType });
+    const ab = uint8ToSafeArrayBuffer(audio);
+    body = new Blob([ab], { type: contentType });
   } else {
+    // audio is ArrayBuffer here
     body = new Blob([audio], { type: contentType });
   }
 
@@ -198,16 +218,16 @@ export default function MusicPage() {
         <button
           onClick={onGenerate}
           disabled={loading || !prompt.trim()}
-          style={{ padding: "10px 14px", cursor: loading ? "not-allowed" : "pointer" }}
+          style={{
+            padding: "10px 14px",
+            cursor: loading ? "not-allowed" : "pointer",
+          }}
         >
           {loading ? "Generating..." : "Generate Final Song"}
         </button>
 
         {loading && (
-          <button
-            onClick={onStop}
-            style={{ padding: "10px 14px" }}
-          >
+          <button onClick={onStop} style={{ padding: "10px 14px" }}>
             Stop
           </button>
         )}
@@ -234,4 +254,4 @@ export default function MusicPage() {
       )}
     </div>
   );
-                                       }
+}
