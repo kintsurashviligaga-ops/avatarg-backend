@@ -1,7 +1,41 @@
 import { NextResponse } from "next/server";
-import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { createClient } from "@supabase/supabase-js";
 
-export const runtime = "nodejs";
+type JobRow = {
+  id: string;
+  status: "queued" | "processing" | "done" | "error" | string;
+  public_url: string | null;
+  filename: string | null;
+  error_message: string | null;
+  updated_at?: string | null;
+};
+
+function supabaseAdmin() {
+  const url = process.env.SUPABASE_URL;
+  const key =
+    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY;
+
+  if (!url || !key) {
+    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+  }
+
+  return createClient(url, key, {
+    auth: { persistSession: false },
+  });
+}
+
+// Optional CORS (თუ UI სხვა დომენიდან გიკავშირდება)
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  };
+}
+
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 204, headers: corsHeaders() });
+}
 
 export async function GET(req: Request) {
   try {
@@ -10,55 +44,52 @@ export async function GET(req: Request) {
 
     if (!id) {
       return NextResponse.json(
-        { ok: false, error: "missing_job_id" },
-        { status: 400 }
+        { ok: false, error: "Missing ?id=JOB_ID" },
+        { status: 400, headers: corsHeaders() }
       );
     }
 
-    const { data, error } = await supabaseAdmin
+    const supabase = supabaseAdmin();
+
+    // ✅ ცხრილის სახელი: music_jobs
+    const { data, error } = await supabase
       .from("music_jobs")
-      .select(
-        `
-        id,
-        status,
-        prompt,
-        duration_sec,
-        public_url,
-        filename,
-        content_type,
-        error_message,
-        updated_at
-        `
-      )
+      .select("id,status,public_url,filename,error_message,updated_at")
       .eq("id", id)
-      .single();
+      .maybeSingle<JobRow>();
 
-    if (error || !data) {
+    if (error) {
       return NextResponse.json(
-        { ok: false, error: "job_not_found", details: error?.message },
-        { status: 404 }
+        { ok: false, error: error.message },
+        { status: 500, headers: corsHeaders() }
       );
     }
 
-    return NextResponse.json({
-      ok: true,
-      job: {
-        id: data.id,
-        status: data.status,
-        prompt: data.prompt,
-        duration_sec: data.duration_sec,
-        public_url: data.public_url,
-        filename: data.filename,
-        content_type: data.content_type,
-        error_message: data.error_message,
-        updated_at: data.updated_at,
-      },
-    });
-  } catch (err: any) {
-    console.error("GET /api/music/status failed:", err);
+    if (!data) {
+      return NextResponse.json(
+        { ok: false, error: "Job not found", id },
+        { status: 404, headers: corsHeaders() }
+      );
+    }
+
     return NextResponse.json(
-      { ok: false, error: "server_error", details: err?.message ?? String(err) },
-      { status: 500 }
+      {
+        ok: true,
+        result: {
+          id: data.id,
+          status: data.status,
+          publicUrl: data.public_url,
+          filename: data.filename,
+          errorMessage: data.error_message,
+          updatedAt: data.updated_at ?? null,
+        },
+      },
+      { status: 200, headers: corsHeaders() }
+    );
+  } catch (e: any) {
+    return NextResponse.json(
+      { ok: false, error: e?.message ?? String(e) },
+      { status: 500, headers: corsHeaders() }
     );
   }
 }
