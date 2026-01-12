@@ -1,104 +1,71 @@
-import { NextRequest, NextResponse } from "next/server";
-import OpenAI from "openai";
+import { NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
 
-type ApiOk = {
-  ok: true;
-  title: string;
-  bpm: number;
-  lyrics: string;
-  voice: {
-    provider: "elevenlabs";
-    voiceId: string | null;
-    url: string | null;
+function corsHeaders(origin?: string | null) {
+  const allowed =
+    process.env.NEXT_PUBLIC_FRONTEND_ORIGIN
+      ? process.env.NEXT_PUBLIC_FRONTEND_ORIGIN
+      : "*";
+
+  return {
+    "Access-Control-Allow-Origin": allowed === "*" ? "*" : (origin ?? allowed),
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Credentials": "true",
+    Vary: "Origin",
   };
-};
+}
 
-type ApiErr = {
-  ok: false;
-  error: string;
-};
+export async function OPTIONS(req: Request) {
+  const origin = req.headers.get("origin");
+  return new Response(null, { status: 204, headers: corsHeaders(origin) });
+}
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
+  const origin = req.headers.get("origin");
+  const headers = corsHeaders(origin);
+
   try {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      return NextResponse.json<ApiErr>(
-        { ok: false, error: "Missing OPENAI_API_KEY" },
-        { status: 500 }
+    const body = await req.json().catch(() => null);
+
+    const prompt = String(body?.prompt ?? "").trim();
+    const durationSec =
+      body?.durationSec != null ? Number(body.durationSec) : null;
+
+    if (!prompt || prompt.length < 5) {
+      return NextResponse.json(
+        { ok: false, error: "prompt_required" },
+        { status: 400, headers }
       );
     }
 
-    const body = await req.json().catch(() => ({} as any));
+    const { data, error } = await supabaseAdmin
+      .from("music_jobs")
+      .insert({
+        status: "queued",
+        prompt,
+        duration_sec: Number.isFinite(durationSec) ? durationSec : null,
+        created_at: new Date().toISOString(),
+      })
+      .select("id,status,prompt,duration_sec,created_at")
+      .single();
 
-    const mood = typeof body?.mood === "string" ? body.mood : "Happy / festive";
-    const genre = typeof body?.genre === "string" ? body.genre : "Pop";
-    const language = typeof body?.language === "string" ? body.language : "English";
-    const topic = typeof body?.topic === "string" ? body.topic : "Avatar G promo";
-    const bpm = Number.isFinite(Number(body?.bpm)) ? Number(body.bpm) : 120;
-
-    const prompt = `
-Write catchy, brand-safe advertising song lyrics.
-
-Mood: ${mood}
-Genre: ${genre}
-Language: ${language}
-Tempo: ~${bpm} BPM
-Topic: ${topic}
-
-Structure:
-- Verse 1
-- Chorus
-- Verse 2
-- Chorus
-- Bridge
-- Final Chorus / Outro
-
-Rules:
-- Modern, upbeat, easy to sing
-- No explicit content
-- Clear memorable chorus
-- Suitable for AI vocal generation
-`.trim();
-
-    const openai = new OpenAI({ apiKey });
-
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0.8,
-      max_tokens: 700,
-      messages: [
-        { role: "system", content: "You are a professional songwriter. Return lyrics only." },
-        { role: "user", content: prompt },
-      ],
-    });
-
-    const lyrics = completion.choices?.[0]?.message?.content?.trim() ?? "";
-    if (!lyrics) {
-      return NextResponse.json<ApiErr>(
-        { ok: false, error: "OpenAI returned empty lyrics" },
-        { status: 502 }
+    if (error) {
+      console.error("music_jobs insert error:", error);
+      return NextResponse.json(
+        { ok: false, error: "db_insert_failed", details: error.message },
+        { status: 500, headers }
       );
     }
 
-    const out: ApiOk = {
-      ok: true,
-      title: "Avatar G Song",
-      bpm,
-      lyrics,
-      // ამ endpoint-ში ჯერ მხოლოდ ლირიკებს ვაბრუნებთ
-      // (შენ UI-ში უკვე სწორად იყენებ url-ს)
-      voice: { provider: "elevenlabs", voiceId: null, url: null },
-    };
-
-    return NextResponse.json(out);
+    return NextResponse.json({ ok: true, job: data }, { status: 200, headers });
   } catch (err: any) {
-    console.error("❌ /api/music/generate error:", err);
-    return NextResponse.json<ApiErr>(
-      { ok: false, error: err?.message ?? "Failed to generate lyrics" },
-      { status: 500 }
+    console.error("POST /api/music/generate failed:", err?.message ?? err);
+    return NextResponse.json(
+      { ok: false, error: "server_error", details: err?.message ?? String(err) },
+      { status: 500, headers }
     );
   }
 }
