@@ -9,7 +9,7 @@ function corsHeaders(origin?: string | null) {
     : "*";
 
   return {
-    "Access-Control-Allow-Origin": allowed === "*" ? "*" : origin ?? allowed,
+    "Access-Control-Allow-Origin": allowed === "*" ? "*" : (origin ?? allowed),
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Allow-Credentials": "true",
@@ -30,11 +30,13 @@ export async function POST(req: Request) {
     const body = await req.json().catch(() => null);
 
     const prompt = String(body?.prompt ?? "").trim();
-    const durationSecRaw = body?.durationSec;
-    const durationSec =
-      durationSecRaw != null && Number.isFinite(Number(durationSecRaw))
-        ? Math.max(5, Math.min(120, Number(durationSecRaw)))
-        : null;
+
+    // optional config (worker გამოიყენებს თუ უნდა)
+    const music_length_ms =
+      body?.music_length_ms != null ? Number(body.music_length_ms) : 30000;
+    const output_format = String(body?.output_format ?? "mp3");
+    const model_id = String(body?.model_id ?? "music_v1");
+    const force_instrumental = Boolean(body?.force_instrumental ?? false);
 
     if (!prompt || prompt.length < 5) {
       return NextResponse.json(
@@ -43,21 +45,22 @@ export async function POST(req: Request) {
       );
     }
 
-    // Optional: user auth (if you pass JWT from frontend)
-    // const authHeader = req.headers.get("authorization") || "";
-    // const userToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    const createdAt = new Date().toISOString();
 
-    // Insert job into queue
+    // ✅ Insert job into DB queue
     const { data, error } = await supabaseAdmin
       .from("music_jobs")
       .insert({
         status: "queued",
         prompt,
-        duration_sec: durationSec,
-        provider: "hybrid", // future: elevenlabs | rvc | suno | etc
-        created_at: new Date().toISOString(),
+        music_length_ms: Number.isFinite(music_length_ms) ? music_length_ms : 30000,
+        output_format,
+        model_id,
+        force_instrumental,
+        created_at: createdAt,
+        updated_at: createdAt,
       })
-      .select("id,status,prompt,duration_sec,provider,created_at")
+      .select("id,status,created_at")
       .single();
 
     if (error) {
@@ -68,7 +71,11 @@ export async function POST(req: Request) {
       );
     }
 
-    return NextResponse.json({ ok: true, job: data }, { status: 200, headers });
+    // ✅ Always return jobId (stable contract for UI)
+    return NextResponse.json(
+      { ok: true, jobId: data.id, status: data.status, createdAt: data.created_at },
+      { status: 200, headers }
+    );
   } catch (err: any) {
     console.error("POST /api/music/generate failed:", err?.message ?? err);
     return NextResponse.json(
