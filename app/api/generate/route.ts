@@ -19,18 +19,26 @@ export async function POST(req: NextRequest) {
     } = body;
 
     const prompt = `
-Write a catchy song lyrics.
+Write catchy, brand-safe song lyrics.
+
 Mood: ${mood}
 Genre: ${genre}
 Language: ${language}
 Topic: ${topic}
 
-Include:
-- Verse
+Structure:
+- Verse 1
+- Chorus
+- Verse 2
 - Chorus
 - Bridge
-- Outro
-Make it modern, brand-safe, and easy to sing.
+- Final Chorus / Outro
+
+Rules:
+- Modern, upbeat, easy to sing
+- No explicit content
+- Clear memorable chorus
+- Suitable for AI vocal generation
 `;
 
     const completion = await openai.chat.completions.create({
@@ -39,16 +47,23 @@ Make it modern, brand-safe, and easy to sing.
         { role: "system", content: "You are a professional songwriter." },
         { role: "user", content: prompt },
       ],
+      temperature: 0.8,
     });
+
+    const lyrics = completion.choices[0]?.message?.content ?? "";
 
     return NextResponse.json({
       success: true,
-      lyrics: completion.choices[0].message.content,
+      lyrics,
     });
   } catch (error: any) {
-    console.error("Music generate error:", error);
+    console.error("Lyrics generate error:", error);
+
     return NextResponse.json(
-      { success: false, error: error.message },
+      {
+        success: false,
+        error: "Failed to generate lyrics",
+      },
       { status: 500 }
     );
   }
