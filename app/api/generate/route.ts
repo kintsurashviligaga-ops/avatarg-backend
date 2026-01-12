@@ -2,27 +2,23 @@ import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 
 export const runtime = "nodejs";
-export const dynamic = "force-dynamic"; // avoid caching on Vercel
+export const dynamic = "force-dynamic";
 
 type Body = {
   mood?: string;
   genre?: string;
   language?: string;
   topic?: string;
-  mustInclude?: string;
   bpm?: number;
 };
 
-function cleanStr(v: unknown, fallback: string, max = 120) {
-  if (typeof v !== "string") return fallback;
-  const s = v.trim();
-  return s ? s.slice(0, max) : fallback;
+function clean(v: unknown, fallback: string) {
+  return typeof v === "string" && v.trim() ? v.trim() : fallback;
 }
 
 function cleanBpm(v: unknown, fallback = 120) {
-  const n = typeof v === "number" ? v : Number(v);
+  const n = Number(v);
   if (!Number.isFinite(n)) return fallback;
-  // keep in a sensible range
   return Math.min(180, Math.max(60, Math.round(n)));
 }
 
@@ -35,14 +31,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const raw: Body = await req.json().catch(() => ({} as Body));
+    const raw: Body = await req.json().catch(() => ({}));
 
-    const mood = cleanStr(raw.mood, "Happy / festive", 60);
-    const genre = cleanStr(raw.genre, "Pop", 60);
-    const language = cleanStr(raw.language, "English", 40);
-    const topic = cleanStr(raw.topic, "Avatar G promo", 120);
-    const mustInclude = cleanStr(raw.mustInclude, "", 160);
-    const bpm = cleanBpm(raw.bpm, 120);
+    const mood = clean(raw.mood, "Happy / festive");
+    const genre = clean(raw.genre, "Pop");
+    const language = clean(raw.language, "English");
+    const topic = clean(raw.topic, "Avatar G promo");
+    const bpm = cleanBpm(raw.bpm);
 
     const prompt = `
 Write SHORT-to-MEDIUM, catchy, modern advertising song lyrics.
@@ -52,7 +47,6 @@ Genre: ${genre}
 Language: ${language}
 Tempo: ~${bpm} BPM
 Topic: ${topic}
-Must include (optional): ${mustInclude || "(none)"}
 
 Structure (use labels exactly):
 Verse 1:
@@ -62,15 +56,18 @@ Bridge:
 Final Chorus / Outro:
 
 Rules:
-- Brand-safe, no explicit content.
-- Strong, memorable chorus with a clear CTA for Avatar G.
-- Simple words, easy to sing.
-- Avoid extra explanations. Output ONLY the lyrics with the section labels.
+- Brand-safe, no explicit content
+- Strong, memorable chorus
+- Easy to sing
+- Clear CTA for Avatar G
+- Output ONLY the lyrics with labels
 `.trim();
 
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    });
 
-    const completion = await client.chat.completions.create({
+    const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0.8,
       max_tokens: 650,
@@ -78,17 +75,17 @@ Rules:
         {
           role: "system",
           content:
-            "You are a professional songwriter for brand-safe advertising music. Output only lyrics with section labels.",
+            "You are a professional songwriter for brand-safe advertising music.",
         },
         { role: "user", content: prompt },
       ],
     });
 
-    const lyrics = (completion.choices?.[0]?.message?.content ?? "").trim();
+    const lyrics = completion.choices?.[0]?.message?.content?.trim();
 
     if (!lyrics) {
       return NextResponse.json(
-        { success: false, error: "OpenAI returned empty lyrics" },
+        { success: false, error: "Empty lyrics from OpenAI" },
         { status: 502 }
       );
     }
@@ -110,16 +107,15 @@ Rules:
         },
       }
     );
-  } catch (error: any) {
-    console.error("Lyrics generate error:", error);
+  } catch (err: any) {
+    console.error("❌ /api/music/generate error:", err);
 
     return NextResponse.json(
       {
         success: false,
-        error: String(error?.message ?? "Failed to generate lyrics"),
+        error: String(err?.message ?? "Internal error"),
       },
-      { status: 500, headers: { "cache-control": "no-store" } }
+      { status: 500 }
     );
   }
 }
-```0
