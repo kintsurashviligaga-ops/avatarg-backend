@@ -134,6 +134,8 @@ export default function MusicPage() {
   async function copy(text: string) {
     try {
       await navigator.clipboard.writeText(text);
+      setNote("✅ Copied to clipboard");
+      setTimeout(() => setNote(""), 1800);
     } catch {
       // ignore
     }
@@ -243,6 +245,18 @@ export default function MusicPage() {
                 >
                   Copy Lyrics
                 </button>
+
+                {(audioUrl && (
+                  <a
+                    href={audioUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm hover:bg-black/40"
+                  >
+                    Open MP3
+                  </a>
+                )) ||
+                  null}
               </div>
 
               <pre className="whitespace-pre-wrap rounded-lg border border-white/10 bg-black/30 p-3 text-sm leading-relaxed">
