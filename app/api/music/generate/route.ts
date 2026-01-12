@@ -69,8 +69,8 @@ Rules:
       lyrics,
       voice: {
         provider: "elevenlabs",
-        voiceId: body.voiceId || "default",
-        url: null, // later filled by TTS pipeline
+        voiceId: "default",
+        url: null,
       },
       note: "Lyrics generated successfully",
     });
