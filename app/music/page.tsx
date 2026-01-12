@@ -1,257 +1,312 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-type UploadJson = { url?: string; path?: string; error?: string };
+type Step = "idle" | "starting" | "waiting" | "done" | "error";
 
-function safeJsonParse(text: string) {
+type StatusResponse = {
+  ok: boolean;
+  result?: {
+    id: string;
+    status: "queued" | "processing" | "done" | "error" | string;
+    publicUrl?: string | null;
+    filename?: string | null;
+    errorMessage?: string | null;
+    updatedAt?: string | null;
+  };
+  error?: string;
+};
+
+function cx(...classes: Array<string | false | undefined | null>) {
+  return classes.filter(Boolean).join(" ");
+}
+
+async function safeText(res: Response) {
   try {
-    return JSON.parse(text);
+    return await res.text();
+  } catch {
+    return "";
+  }
+}
+
+async function safeJson<T = any>(res: Response): Promise<T | null> {
+  try {
+    return (await res.json()) as T;
   } catch {
     return null;
   }
 }
 
-function base64ToUint8Array(base64: string) {
-  // supports plain base64 or "data:audio/mpeg;base64,...."
-  const clean = base64.includes(",") ? base64.split(",").pop()! : base64;
-  const binary = atob(clean);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
-
-/**
- * ✅ Critical: always convert Uint8Array (even SharedArrayBuffer-backed)
- * into a real ArrayBuffer slice/copy so Blob() never fails TS build.
- */
-function uint8ToSafeArrayBuffer(u8: Uint8Array): ArrayBuffer {
-  const start = u8.byteOffset ?? 0;
-  const len = u8.byteLength ?? u8.length;
-
-  const buf: any = u8.buffer;
-  if (buf && typeof buf.slice === "function") {
-    return buf.slice(start, start + len);
-  }
-
-  const copy = new Uint8Array(len);
-  copy.set(u8);
-  return copy.buffer;
-}
-
-async function uploadToR2(
-  audio: ArrayBuffer | Uint8Array | Blob,
-  contentType = "audio/mpeg",
-  signal?: AbortSignal
-): Promise<string> {
-  let body: BodyInit;
-
-  if (audio instanceof Blob) {
-    body = audio;
-  } else if (audio instanceof Uint8Array) {
-    const ab = uint8ToSafeArrayBuffer(audio);
-    body = new Blob([ab], { type: contentType });
-  } else {
-    // audio is ArrayBuffer here
-    body = new Blob([audio], { type: contentType });
-  }
-
-  const uploadRes = await fetch("/api/music/upload", {
-    method: "POST",
-    headers: { "Content-Type": contentType },
-    body,
-    signal,
-  });
-
-  const uploadText = await uploadRes.text();
-  const uploadJson = safeJsonParse(uploadText) as UploadJson | null;
-
-  if (!uploadRes.ok) {
-    throw new Error(
-      `Upload failed (${uploadRes.status}): ${
-        uploadJson?.error || uploadText || "Unknown upload error"
-      }`
-    );
-  }
-
-  const url = uploadJson?.url;
-  if (!url) {
-    throw new Error(`Upload response missing url: ${uploadText}`);
-  }
-
-  return url;
-}
-
-async function generateFinalSong(
-  prompt: string,
-  opts: { signal?: AbortSignal } = {}
-): Promise<string> {
-  const trimmed = prompt.trim();
-  if (!trimmed) throw new Error("Prompt is empty.");
-
-  // 1) Compose music
-  const composeRes = await fetch("/api/music/compose", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      prompt: trimmed,
-      music_length_ms: 30000,
-      output_format: "mp3",
-      model_id: "music_v1",
-      force_instrumental: false,
-    }),
-    signal: opts.signal,
-  });
-
-  const ct = (composeRes.headers.get("content-type") || "").toLowerCase();
-
-  // If not ok, read best error message
-  if (!composeRes.ok) {
-    const errText = await composeRes.text();
-    const errJson = safeJsonParse(errText);
-    throw new Error(
-      `Compose failed (${composeRes.status}): ${
-        errJson?.error || errJson?.message || errText || "Unknown error"
-      }`
-    );
-  }
-
-  // A) If backend returned audio bytes
-  // Many servers return audio/* OR application/octet-stream
-  if (ct.includes("audio/") || ct.includes("application/octet-stream")) {
-    const audioBytes = await composeRes.arrayBuffer();
-    return await uploadToR2(audioBytes, "audio/mpeg", opts.signal);
-  }
-
-  // B) Otherwise treat it as text/json
-  const text = await composeRes.text();
-  const json = safeJsonParse(text);
-
-  // Some backends return direct url at top-level
-  if (json?.url && typeof json.url === "string") return json.url;
-
-  // Your current shape: { data: { url } }
-  if (json?.data?.url && typeof json.data.url === "string") return json.data.url;
-
-  // base64 shape: { data: { audio_base64, content_type } }
-  if (json?.data?.audio_base64 && typeof json.data.audio_base64 === "string") {
-    const bytes = base64ToUint8Array(json.data.audio_base64);
-    const contentType =
-      (json.data.content_type && String(json.data.content_type)) || "audio/mpeg";
-    return await uploadToR2(bytes, contentType, opts.signal);
-  }
-
-  // if server actually returned something else (html/text)
-  throw new Error(
-    `Unknown compose response format. content-type=${ct}. body=${text?.slice(0, 300)}`
-  );
-}
-
 export default function MusicPage() {
-  const [prompt, setPrompt] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [audioUrl, setAudioUrl] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [prompt, setPrompt] = useState(
+    "Georgian New Year vibe, upbeat pop, festive, 120bpm, joyful chorus"
+  );
+
+  const [step, setStep] = useState<Step>("idle");
+  const [error, setError] = useState<string>("");
+
+  const [jobId, setJobId] = useState<string>("");
+  const [statusText, setStatusText] = useState<string>("");
+
+  const [publicUrl, setPublicUrl] = useState<string>("");
+  const [filename, setFilename] = useState<string>("");
 
   const abortRef = useRef<AbortController | null>(null);
+  const pollingRef = useRef<number | null>(null);
 
   useEffect(() => {
-    // cleanup on unmount
     return () => {
+      // cleanup
       abortRef.current?.abort();
+      if (pollingRef.current) window.clearInterval(pollingRef.current);
     };
   }, []);
 
-  const onGenerate = async () => {
-    const trimmed = prompt.trim();
-    if (!trimmed) {
-      setError("Please enter a prompt.");
-      return;
+  const canGenerate = useMemo(() => {
+    const okPrompt = prompt.trim().length >= 6;
+    const busy = step === "starting" || step === "waiting";
+    return okPrompt && !busy;
+  }, [prompt, step]);
+
+  async function startJob(p: string): Promise<string> {
+    const res = await fetch("/api/music/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: p,
+        music_length_ms: 30000,
+        output_format: "mp3",
+        model_id: "music_v1",
+        force_instrumental: false,
+      }),
+      signal: abortRef.current?.signal,
+    });
+
+    if (!res.ok) {
+      const t = await safeText(res);
+      throw new Error(`Generate failed: ${res.status}\n${t}`);
     }
 
-    // abort previous run if any
+    const data = (await safeJson<any>(res)) || {};
+    const id = data.jobId || data.id || data?.result?.jobId || data?.result?.id;
+
+    if (!id || typeof id !== "string") {
+      throw new Error(
+        `Generate response missing jobId. Got: ${JSON.stringify(data).slice(0, 500)}`
+      );
+    }
+
+    return id;
+  }
+
+  async function fetchStatus(id: string): Promise<StatusResponse> {
+    const res = await fetch(`/api/music/status?id=${encodeURIComponent(id)}`, {
+      method: "GET",
+      signal: abortRef.current?.signal,
+      cache: "no-store",
+    });
+
+    const data = (await safeJson<StatusResponse>(res)) || null;
+
+    if (!res.ok) {
+      const t = await safeText(res);
+      throw new Error(
+        `Status failed: ${res.status}\n${data?.error || t || "Unknown error"}`
+      );
+    }
+
+    if (!data) throw new Error("Status returned invalid JSON");
+    return data;
+  }
+
+  function stopPolling() {
+    if (pollingRef.current) {
+      window.clearInterval(pollingRef.current);
+      pollingRef.current = null;
+    }
+  }
+
+  async function onGenerate() {
+    setError("");
+    setPublicUrl("");
+    setFilename("");
+    setJobId("");
+    setStatusText("");
+
+    // abort previous
     abortRef.current?.abort();
     abortRef.current = new AbortController();
 
-    setLoading(true);
-    setError(null);
-    setAudioUrl(null);
+    stopPolling();
 
     try {
-      const url = await generateFinalSong(trimmed, {
-        signal: abortRef.current.signal,
-      });
-      setAudioUrl(url);
-    } catch (e: any) {
-      if (e?.name === "AbortError") {
-        // ignore abort
+      setStep("starting");
+
+      const p = prompt.trim();
+      const id = await startJob(p);
+      setJobId(id);
+
+      setStep("waiting");
+      setStatusText("queued");
+
+      // Immediately check once
+      const first = await fetchStatus(id);
+      const st = first.result?.status || "queued";
+      setStatusText(st);
+
+      if (st === "done") {
+        const url = first.result?.publicUrl || "";
+        if (!url) throw new Error("Job done but missing publicUrl");
+        setPublicUrl(url);
+        setFilename(first.result?.filename || `avatar-g-${Date.now()}.mp3`);
+        setStep("done");
         return;
       }
-      setError(e?.message || "Error");
-    } finally {
-      setLoading(false);
-    }
-  };
 
-  const onStop = () => {
+      if (st === "error") {
+        throw new Error(first.result?.errorMessage || "Music job failed");
+      }
+
+      // Poll every 2 seconds
+      pollingRef.current = window.setInterval(async () => {
+        try {
+          const s = await fetchStatus(id);
+          const status = s.result?.status || "queued";
+          setStatusText(status);
+
+          if (status === "done") {
+            const url = s.result?.publicUrl || "";
+            if (!url) throw new Error("Job done but missing publicUrl");
+            setPublicUrl(url);
+            setFilename(s.result?.filename || `avatar-g-${Date.now()}.mp3`);
+            setStep("done");
+            stopPolling();
+          } else if (status === "error") {
+            stopPolling();
+            setStep("error");
+            setError(s.result?.errorMessage || s.error || "Music job failed");
+          }
+        } catch (e: any) {
+          // If aborted, ignore
+          if (e?.name === "AbortError") return;
+          stopPolling();
+          setStep("error");
+          setError(e?.message ?? String(e));
+        }
+      }, 2000);
+    } catch (e: any) {
+      if (e?.name === "AbortError") return;
+      setStep("error");
+      setError(e?.message ?? String(e));
+    }
+  }
+
+  function onStop() {
     abortRef.current?.abort();
-    setLoading(false);
-  };
+    stopPolling();
+    setStep("idle");
+    setStatusText("");
+  }
 
   return (
-    <div style={{ padding: 24, maxWidth: 680 }}>
-      <h1 style={{ marginBottom: 10 }}>🎵 Avatar G — Music Generator</h1>
-      <p style={{ marginTop: 0, opacity: 0.8 }}>
-        Write a prompt (style, mood, instruments). Click Generate.
-      </p>
+    <div className="min-h-screen w-full bg-[#0b1220] text-white">
+      <div className="mx-auto max-w-3xl p-4 sm:p-6">
+        <div className="rounded-2xl border border-white/10 bg-white/5 p-4 sm:p-6 shadow-lg">
+          <div className="flex items-center justify-between gap-3">
+            <h1 className="text-lg sm:text-xl font-semibold">🎶 Music Generator</h1>
 
-      <textarea
-        value={prompt}
-        onChange={(e) => setPrompt(e.target.value)}
-        placeholder='Example: "Upbeat New Year pop, bright synths, claps, 120bpm, happy vibe"'
-        rows={5}
-        style={{ width: "100%", marginBottom: 12, padding: 10 }}
-        disabled={loading}
-      />
-
-      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-        <button
-          onClick={onGenerate}
-          disabled={loading || !prompt.trim()}
-          style={{
-            padding: "10px 14px",
-            cursor: loading ? "not-allowed" : "pointer",
-          }}
-        >
-          {loading ? "Generating..." : "Generate Final Song"}
-        </button>
-
-        {loading && (
-          <button onClick={onStop} style={{ padding: "10px 14px" }}>
-            Stop
-          </button>
-        )}
-      </div>
-
-      {error && (
-        <p style={{ color: "red", marginTop: 12, whiteSpace: "pre-wrap" }}>
-          {error}
-        </p>
-      )}
-
-      {audioUrl && (
-        <div style={{ marginTop: 18 }}>
-          <audio controls src={audioUrl} style={{ width: "100%" }} />
-          <div style={{ marginTop: 10, display: "flex", gap: 14 }}>
-            <a href={audioUrl} target="_blank" rel="noreferrer">
-              🔗 Open
-            </a>
-            <a href={audioUrl} download>
-              ⬇ Download MP3
-            </a>
+            <span
+              className={cx(
+                "text-xs px-2 py-1 rounded-full border",
+                step === "idle" && "border-white/20 text-white/70",
+                step === "starting" && "border-cyan-300/40 text-cyan-200",
+                step === "waiting" && "border-amber-300/40 text-amber-200",
+                step === "done" && "border-emerald-300/40 text-emerald-200",
+                step === "error" && "border-red-300/40 text-red-200"
+              )}
+            >
+              {step === "waiting" ? `waiting: ${statusText || "..."}` : step}
+            </span>
           </div>
+
+          <p className="mt-2 text-sm text-white/70">
+            Prompt ჩაწერე → Generate. სისტემა შექმნის jobId-ს და ავტომატურად დაელოდება
+            დასრულებას. (კოდი აღარ გამოჩნდება ჩათში.)
+          </p>
+
+          <div className="mt-4">
+            <label className="text-xs text-white/60">Prompt</label>
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              rows={4}
+              className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 p-3 text-sm outline-none focus:border-cyan-400/40"
+              placeholder="Describe the music…"
+              disabled={step === "starting" || step === "waiting"}
+            />
+          </div>
+
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <button
+              onClick={onGenerate}
+              disabled={!canGenerate}
+              className={cx(
+                "rounded-xl px-4 py-2 text-sm font-medium",
+                canGenerate
+                  ? "bg-cyan-500/90 hover:bg-cyan-400 text-black"
+                  : "bg-white/10 text-white/40 cursor-not-allowed"
+              )}
+            >
+              Generate
+            </button>
+
+            {(step === "starting" || step === "waiting") && (
+              <button
+                onClick={onStop}
+                className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm hover:bg-white/10"
+              >
+                Stop
+              </button>
+            )}
+
+            {jobId && (
+              <div className="text-xs text-white/60 break-all">
+                jobId: <span className="text-white/80">{jobId}</span>
+              </div>
+            )}
+          </div>
+
+          {error && (
+            <div className="mt-4 rounded-xl border border-red-400/20 bg-red-500/10 p-3 text-sm text-red-200 whitespace-pre-wrap">
+              {error}
+            </div>
+          )}
+
+          {publicUrl && (
+            <div className="mt-5 rounded-2xl border border-white/10 bg-black/25 p-4">
+              <div className="text-xs text-white/60 mb-2">Final MP3</div>
+              <audio controls className="w-full" src={publicUrl} />
+              <div className="mt-3 flex flex-wrap gap-3">
+                <a
+                  href={publicUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm hover:bg-white/10"
+                >
+                  Open
+                </a>
+                <a
+                  href={publicUrl}
+                  download={filename || `avatar-g-${Date.now()}.mp3`}
+                  className="rounded-xl border border-white/10 bg-emerald-500/15 px-4 py-2 text-sm text-emerald-200 hover:bg-emerald-500/25"
+                >
+                  Download
+                </a>
+              </div>
+            </div>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }
