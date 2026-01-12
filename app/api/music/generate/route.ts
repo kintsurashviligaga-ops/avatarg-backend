@@ -1,12 +1,12 @@
-import { NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 
-export const runtime = "nodejs"; // important for binary/audio buffers
+export const runtime = "nodejs"; // required for Buffer / binary
 
-// ---------- Helpers ----------
+// ---------------- Helpers ----------------
 function json(data: any, status = 200, extraHeaders: Record<string, string> = {}) {
-  return new NextResponse(JSON.stringify(data, null, 2), {
+  return new Response(JSON.stringify(data), {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
@@ -17,11 +17,16 @@ function json(data: any, status = 200, extraHeaders: Record<string, string> = {}
 }
 
 function corsHeaders(origin?: string) {
-  // You can tighten this later with an allowlist
+  // If you want to lock this down later:
+  // const allow = (process.env.CORS_ALLOWLIST ?? "").split(",").map(s => s.trim()).filter(Boolean);
+  // const o = origin && allow.includes(origin) ? origin : allow[0] ?? "*";
+  const o = origin ?? "*";
+
   return {
-    "access-control-allow-origin": origin ?? "*",
+    "access-control-allow-origin": o,
     "access-control-allow-methods": "POST,OPTIONS",
     "access-control-allow-headers": "content-type, authorization",
+    "access-control-max-age": "86400",
   };
 }
 
@@ -45,7 +50,6 @@ async function elevenLabsTTS({
   text: string;
   modelId?: string;
 }) {
-  // MP3 stream endpoint (stable)
   const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(
     voiceId
   )}/stream?output_format=mp3_44100_128`;
@@ -79,15 +83,12 @@ async function elevenLabsTTS({
 }
 
 function buildSingableText(lyrics: string) {
-  // ElevenLabs TTS is not a singing engine; we still format it “music-friendly”
-  // so it sounds like a promo-chant/vox over a beat.
-  // Keep it short to avoid extremely long TTS.
-  const cleaned = lyrics
+  const cleaned = String(lyrics || "")
     .replace(/\r/g, "")
     .replace(/\*\*/g, "")
     .trim();
 
-  // Take chorus + 1 verse if present, otherwise first ~900 chars
+  // pick chorus + verse1 if exists
   const chorusMatch = cleaned.match(/(chorus[:\s].*?)(\n\n|$)/is);
   const verseMatch = cleaned.match(/(verse\s*1[:\s].*?)(\n\n|$)/is);
 
@@ -95,16 +96,14 @@ function buildSingableText(lyrics: string) {
   if (chorusMatch?.[1]) parts.push(chorusMatch[1]);
   if (verseMatch?.[1]) parts.push(verseMatch[1]);
 
-  const text =
-    parts.length > 0 ? parts.join("\n\n") : cleaned.slice(0, 900);
+  const text = parts.length > 0 ? parts.join("\n\n") : cleaned.slice(0, 900);
 
-  // Add “breathing / spacing” for better cadence
   return text
-    .replace(/\n+/g, "\n")
-    .replace(/[,;]/g, ", ")
+    .replace(/\n{3,}/g, "\n\n")
     .replace(/[.]/g, ". ")
     .replace(/\s+/g, " ")
-    .trim();
+    .trim()
+    .slice(0, 1100); // protect from too long TTS
 }
 
 async function generateLyricsWithOpenAI(input: {
@@ -139,27 +138,55 @@ Write a SHORT-to-MEDIUM, catchy, modern song lyric for:
 Must include (if any): ${mustInclude || "(none)"}
 
 Rules:
-- Keep it clean and brand-safe (no explicit content).
-- Make a strong, memorable chorus.
-- Use simple words, easy to sing.
-- Include CTA about Avatar G (create content fast, AI media factory, business promo).
-Return JSON ONLY with keys:
-"title", "bpm", "lyrics"
-Where "lyrics" contains labeled sections: Verse 1, Chorus, Verse 2, Bridge, Chorus, Outro.
-`;
+- Clean and brand-safe (no explicit content).
+- Strong, memorable chorus.
+- Simple words, easy to sing.
+- Clear CTA about Avatar G (AI media factory for business).
+Return JSON ONLY with keys: "title", "bpm", "lyrics".
+Where "lyrics" contains labeled sections:
+Verse 1, Chorus, Verse 2, Bridge, Chorus, Outro.
+`.trim();
 
-  // Using Chat Completions for compatibility
-  const completion = await client.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature: 0.8,
-    messages: [
-      { role: "system", content: "You are a professional songwriter for brand-safe advertising music." },
-      { role: "user", content: input.userPrompt ? `${prompt}\nUser prompt: ${input.userPrompt}` : prompt },
-    ],
-    response_format: { type: "json_object" },
-  });
+  // Try strict JSON mode; fallback if library/model ever fails
+  let raw = "";
+  try {
+    const completion = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.8,
+      messages: [
+        {
+          role: "system",
+          content: "You are a professional songwriter for brand-safe advertising music.",
+        },
+        {
+          role: "user",
+          content: input.userPrompt ? `${prompt}\nUser prompt: ${input.userPrompt}` : prompt,
+        },
+      ],
+      response_format: { type: "json_object" } as any,
+    });
 
-  const raw = completion.choices?.[0]?.message?.content ?? "{}";
+    raw = completion.choices?.[0]?.message?.content ?? "{}";
+  } catch (e) {
+    const completion = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.8,
+      messages: [
+        {
+          role: "system",
+          content:
+            "Return a JSON object with keys title, bpm, lyrics (with Verse/Chorus/Bridge labels). No extra text.",
+        },
+        {
+          role: "user",
+          content: input.userPrompt ? `${prompt}\nUser prompt: ${input.userPrompt}` : prompt,
+        },
+      ],
+    });
+
+    raw = completion.choices?.[0]?.message?.content ?? "{}";
+  }
+
   let parsed: any;
   try {
     parsed = JSON.parse(raw);
@@ -167,17 +194,18 @@ Where "lyrics" contains labeled sections: Verse 1, Chorus, Verse 2, Bridge, Chor
     parsed = { title: "Avatar G Anthem", bpm, lyrics: raw };
   }
 
-  return {
-    title: String(parsed.title ?? "Avatar G Anthem"),
-    bpm: Number(parsed.bpm ?? bpm),
-    lyrics: String(parsed.lyrics ?? ""),
-  };
+  const title = String(parsed.title ?? "Avatar G Anthem").slice(0, 80);
+  const outBpm = Number(parsed.bpm ?? bpm);
+  const lyrics = String(parsed.lyrics ?? "").trim();
+
+  if (!lyrics) throw new Error("OpenAI returned empty lyrics");
+
+  return { title, bpm: outBpm, lyrics };
 }
 
 function getSupabaseAdmin() {
   const url = process.env.SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
   if (!url || !serviceKey) return null;
 
   return createClient(url, serviceKey, {
@@ -185,13 +213,21 @@ function getSupabaseAdmin() {
   });
 }
 
-// ---------- Routes ----------
-export async function OPTIONS(req: Request) {
-  const origin = req.headers.get("origin") ?? "*";
-  return new NextResponse(null, { status: 204, headers: corsHeaders(origin) });
+function nowStamp() {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(
+    now.getHours()
+  )}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
 }
 
-export async function POST(req: Request) {
+// ---------------- Routes ----------------
+export async function OPTIONS(req: NextRequest) {
+  const origin = req.headers.get("origin") ?? "*";
+  return new Response(null, { status: 204, headers: corsHeaders(origin) });
+}
+
+export async function POST(req: NextRequest) {
   const origin = req.headers.get("origin") ?? "*";
 
   try {
@@ -205,10 +241,10 @@ export async function POST(req: Request) {
       mustInclude,
       prompt: userPrompt,
       bpm,
-      voiceId, // optional override
+      voiceId,
     } = body ?? {};
 
-    // 1) Generate lyrics
+    // 1) Lyrics
     const { title, lyrics, bpm: outBpm } = await generateLyricsWithOpenAI({
       mood,
       genre,
@@ -219,13 +255,13 @@ export async function POST(req: Request) {
       bpm: typeof bpm === "number" ? bpm : undefined,
     });
 
-    // 2) Create vocal audio via ElevenLabs
+    // 2) ElevenLabs MP3
     const elevenKey = process.env.ELEVENLABS_API_KEY;
     if (!elevenKey) throw new Error("Missing ELEVENLABS_API_KEY");
 
     const defaultVoiceId = process.env.ELEVENLABS_VOICE_ID;
     const selectedVoiceId = (voiceId && String(voiceId)) || defaultVoiceId;
-    if (!selectedVoiceId) throw new Error("Missing ELEVENLABS_VOICE_ID (or pass voiceId in body)");
+    if (!selectedVoiceId) throw new Error("Missing ELEVENLABS_VOICE_ID (or pass voiceId)");
 
     const ttsText = buildSingableText(lyrics);
     const vocalMp3 = await elevenLabsTTS({
@@ -235,7 +271,7 @@ export async function POST(req: Request) {
       modelId: process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2",
     });
 
-    // 3) Upload to Supabase Storage (recommended)
+    // 3) Upload to Supabase (optional but recommended)
     const bucket = process.env.SUPABASE_STORAGE_BUCKET || "music";
     const supabase = getSupabaseAdmin();
 
@@ -243,15 +279,7 @@ export async function POST(req: Request) {
     let storagePath: string | null = null;
 
     if (supabase) {
-      const now = new Date();
-      const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(
-        now.getDate()
-      ).padStart(2, "0")}-${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(
-        2,
-        "0"
-      )}${String(now.getSeconds()).padStart(2, "0")}`;
-
-      const base = safeFileName(`${title}-${language}-${genre}-${stamp}`);
+      const base = safeFileName(`${title}-${language || "en"}-${genre || "pop"}-${nowStamp()}`);
       storagePath = `generated/${base}.mp3`;
 
       const up = await supabase.storage.from(bucket).upload(storagePath, vocalMp3, {
@@ -263,9 +291,6 @@ export async function POST(req: Request) {
 
       const pub = supabase.storage.from(bucket).getPublicUrl(storagePath);
       vocalUrl = pub.data.publicUrl ?? null;
-    } else {
-      // fallback: return base64 (NOT ideal), but prevents total failure if env missing
-      vocalUrl = null;
     }
 
     return json(
@@ -273,18 +298,19 @@ export async function POST(req: Request) {
         ok: true,
         title,
         bpm: outBpm,
-        lyrics,
+        lyrics, // full lyrics (for Suno-ready UI)
+        tts_text: ttsText, // what we used for ElevenLabs
         voice: {
           provider: "elevenlabs",
           voiceId: selectedVoiceId,
-          url: vocalUrl,
+          url: vocalUrl, // null if supabase not configured
           storagePath,
           bytes: vocalMp3.length,
+          contentType: "audio/mpeg",
         },
-        note:
-          supabase
-            ? "Vocal MP3 generated and uploaded to Supabase Storage."
-            : "Vocal MP3 generated but Supabase env missing; set SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY + SUPABASE_STORAGE_BUCKET.",
+        note: supabase
+          ? "Vocal MP3 generated and uploaded to Supabase Storage."
+          : "Vocal MP3 generated but Supabase env missing; set SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY + SUPABASE_STORAGE_BUCKET.",
       },
       200,
       corsHeaders(origin)
@@ -301,4 +327,4 @@ export async function POST(req: Request) {
       corsHeaders(origin)
     );
   }
-  }
+}
