@@ -42,14 +42,19 @@ async function safeJson<T = any>(res: Response): Promise<T | null> {
   }
 }
 
-function extractPublicUrl(r?: MusicResult | null): string {
+function pickPublicUrl(result?: MusicResult): string {
+  if (!result) return "";
   return (
-    r?.publicUrl ??
-    r?.public_url ??
-    r?.fileUrl ??
-    r?.url ??
+    result.publicUrl ||
+    result.public_url ||
+    result.fileUrl ||
+    result.url ||
     ""
   );
+}
+
+function pickFilename(result?: MusicResult): string {
+  return result?.filename || `avatar-g-${Date.now()}.mp3`;
 }
 
 export default function MusicPage() {
@@ -73,6 +78,7 @@ export default function MusicPage() {
     return () => {
       abortRef.current?.abort();
       if (pollingRef.current) window.clearInterval(pollingRef.current);
+      pollingRef.current = null;
     };
   }, []);
 
@@ -114,7 +120,7 @@ export default function MusicPage() {
       data.id ||
       data?.result?.jobId ||
       data?.result?.id ||
-      data?.result?.result?.id;
+      "";
 
     if (!id || typeof id !== "string") {
       throw new Error(
@@ -145,31 +151,6 @@ export default function MusicPage() {
     return data;
   }
 
-  async function handleStatus(s: StatusResponse) {
-    const r = s.result ?? null;
-    const status = r?.status || "queued";
-    setStatusText(status);
-
-    if (status === "done") {
-      const url = extractPublicUrl(r);
-      if (!url) throw new Error("Job done but missing URL/publicUrl");
-      setPublicUrl(url);
-      setFilename(r?.filename || `avatar-g-${Date.now()}.mp3`);
-      setStep("done");
-      stopPolling();
-      return;
-    }
-
-    if (status === "error") {
-      stopPolling();
-      setStep("error");
-      setError(r?.errorMessage || s.error || "Music job failed");
-      return;
-    }
-
-    // queued / processing -> keep waiting
-  }
-
   async function onGenerate() {
     setError("");
     setPublicUrl("");
@@ -192,16 +173,43 @@ export default function MusicPage() {
       setStep("waiting");
       setStatusText("queued");
 
-      // Check once immediately
+      // First check
       const first = await fetchStatus(id);
-      await handleStatus(first);
+      const st = first.result?.status || "queued";
+      setStatusText(st);
 
-      // If already done/error, handleStatus would set step and stop polling
-      // If still waiting, poll every 2 seconds
+      if (st === "done") {
+        const url = pickPublicUrl(first.result);
+        if (!url) throw new Error("Job done but missing publicUrl");
+        setPublicUrl(url);
+        setFilename(pickFilename(first.result));
+        setStep("done");
+        return;
+      }
+
+      if (st === "error") {
+        throw new Error(first.result?.errorMessage || first.error || "Music job failed");
+      }
+
+      // Poll
       pollingRef.current = window.setInterval(async () => {
         try {
           const s = await fetchStatus(id);
-          await handleStatus(s);
+          const status = s.result?.status || "queued";
+          setStatusText(status);
+
+          if (status === "done") {
+            const url = pickPublicUrl(s.result);
+            if (!url) throw new Error("Job done but missing publicUrl");
+            setPublicUrl(url);
+            setFilename(pickFilename(s.result));
+            setStep("done");
+            stopPolling();
+          } else if (status === "error") {
+            stopPolling();
+            setStep("error");
+            setError(s.result?.errorMessage || s.error || "Music job failed");
+          }
         } catch (e: any) {
           if (e?.name === "AbortError") return;
           stopPolling();
@@ -228,9 +236,7 @@ export default function MusicPage() {
       <div className="mx-auto max-w-3xl p-4 sm:p-6">
         <div className="rounded-2xl border border-white/10 bg-white/5 p-4 sm:p-6 shadow-lg">
           <div className="flex items-center justify-between gap-3">
-            <h1 className="text-lg sm:text-xl font-semibold">
-              🎶 Music Generator
-            </h1>
+            <h1 className="text-lg sm:text-xl font-semibold">🎶 Music Generator</h1>
 
             <span
               className={cx(
@@ -247,8 +253,7 @@ export default function MusicPage() {
           </div>
 
           <p className="mt-2 text-sm text-white/70">
-            Prompt ჩაწერე → Generate. სისტემა შექმნის jobId-ს და ავტომატურად დაელოდება
-            დასრულებას.
+            Prompt ჩაწერე → Generate. სისტემა შექმნის jobId-ს და ავტომატურად დაელოდება დასრულებას.
           </p>
 
           <div className="mt-4">
@@ -326,4 +331,4 @@ export default function MusicPage() {
       </div>
     </div>
   );
-      }
+  }
