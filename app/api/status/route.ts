@@ -1,9 +1,3 @@
-import { NextResponse } from "next/server";
-import { supabaseAdmin } from "../../../lib/supabaseAdmin";
-
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
@@ -19,15 +13,15 @@ export async function GET(req: Request) {
     const { data, error } = await supabaseAdmin
       .from("music_jobs")
       .select(`
-  id,
-  status,
-  prompt,
-  duration_seconds,
-  audio_url,
-  audio_path,
-  error_message,
-  updated_at
-`)
+        id,
+        status,
+        prompt,
+        duration_seconds,
+        audio_url,
+        audio_path,
+        error_message,
+        updated_at
+      `)
       .eq("id", id)
       .single();
 
@@ -40,21 +34,17 @@ export async function GET(req: Request) {
 
     return NextResponse.json({
       ok: true,
-      job: {
-        id: data.id,
-        status: data.status,
-        prompt: data.prompt,
-        duration_seconds: data.duration_seconds,
-audio_url: data.audio_url,
-audio_path: data.audio_path,
-        error_message: data.error_message,
-        updated_at: data.updated_at,
-      },
+      job: data,
     });
   } catch (err: any) {
-    console.error("GET /api/music/status failed:", err);
+    console.error("STATUS API CRASH:", err);
+
     return NextResponse.json(
-      { ok: false, error: "server_error", details: err?.message ?? String(err) },
+      {
+        ok: false,
+        error: "internal_error",
+        details: err?.message ?? String(err),
+      },
       { status: 500 }
     );
   }
