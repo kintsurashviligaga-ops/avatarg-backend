@@ -18,18 +18,16 @@ export async function GET(req: Request) {
 
     const { data, error } = await supabaseAdmin
       .from("music_jobs")
-      .select(
-        `
-        id,
-        status,
-        prompt,
-        duration_sec,
-        filename,
-        content_type,
-        error_message,
-        updated_at
-        `
-      )
+      .select(`
+  id,
+  status,
+  prompt,
+  duration_seconds,
+  audio_url,
+  audio_path,
+  error_message,
+  updated_at
+`)
       .eq("id", id)
       .single();
 
@@ -46,9 +44,9 @@ export async function GET(req: Request) {
         id: data.id,
         status: data.status,
         prompt: data.prompt,
-        duration_sec: data.duration_sec,
-        filename: data.filename,
-        content_type: data.content_type,
+        duration_seconds: data.duration_seconds,
+audio_url: data.audio_url,
+audio_path: data.audio_path,
         error_message: data.error_message,
         updated_at: data.updated_at,
       },
