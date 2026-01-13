@@ -44,17 +44,33 @@ async function safeJson<T = any>(res: Response): Promise<T | null> {
 
 function pickPublicUrl(result?: MusicResult): string {
   if (!result) return "";
-  return (
-    result.publicUrl ||
-    result.public_url ||
-    result.fileUrl ||
-    result.url ||
-    ""
-  );
+  return result.publicUrl || result.public_url || result.fileUrl || result.url || "";
 }
 
 function pickFilename(result?: MusicResult): string {
   return result?.filename || `avatar-g-${Date.now()}.mp3`;
+}
+
+/**
+ * FIX: Signed/Public URLs sometimes fail in <audio> due to CORS/redirect.
+ * We fetch the file, convert to Blob, then use a local object URL.
+ */
+async function toPlayableObjectUrl(remoteUrl: string, signal?: AbortSignal): Promise<string> {
+  const res = await fetch(remoteUrl, {
+    method: "GET",
+    cache: "no-store",
+    signal,
+    // credentials intentionally omitted; signed URL should work without cookies
+  });
+
+  if (!res.ok) {
+    const t = await safeText(res);
+    throw new Error(`Audio fetch failed: ${res.status}\n${t}`);
+  }
+
+  const blob = await res.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  return objectUrl;
 }
 
 export default function MusicPage() {
@@ -68,17 +84,31 @@ export default function MusicPage() {
   const [jobId, setJobId] = useState<string>("");
   const [statusText, setStatusText] = useState<string>("");
 
-  const [publicUrl, setPublicUrl] = useState<string>("");
+  // remoteUrl is the (signed/public) URL returned by backend
+  const [remoteUrl, setRemoteUrl] = useState<string>("");
+
+  // playableUrl is Blob URL created in browser: blob:...
+  const [playableUrl, setPlayableUrl] = useState<string>("");
+
   const [filename, setFilename] = useState<string>("");
 
   const abortRef = useRef<AbortController | null>(null);
   const pollingRef = useRef<number | null>(null);
+
+  // keep track of the current blob url to revoke it
+  const blobUrlRef = useRef<string>("");
 
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
       if (pollingRef.current) window.clearInterval(pollingRef.current);
       pollingRef.current = null;
+
+      // cleanup blob url
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = "";
+      }
     };
   }, []);
 
@@ -115,12 +145,7 @@ export default function MusicPage() {
     }
 
     const data = (await safeJson<any>(res)) || {};
-    const id =
-      data.jobId ||
-      data.id ||
-      data?.result?.jobId ||
-      data?.result?.id ||
-      "";
+    const id = data.jobId || data.id || data?.result?.jobId || data?.result?.id || "";
 
     if (!id || typeof id !== "string") {
       throw new Error(
@@ -142,18 +167,38 @@ export default function MusicPage() {
 
     if (!res.ok) {
       const t = await safeText(res);
-      throw new Error(
-        `Status failed: ${res.status}\n${data?.error || t || "Unknown error"}`
-      );
+      throw new Error(`Status failed: ${res.status}\n${data?.error || t || "Unknown error"}`);
     }
 
     if (!data) throw new Error("Status returned invalid JSON");
     return data;
   }
 
+  async function setFinalResult(result?: MusicResult) {
+    const url = pickPublicUrl(result);
+    if (!url) throw new Error("Job done but missing publicUrl");
+
+    // Save remote
+    setRemoteUrl(url);
+
+    // Convert to playable blob url (fix Failed to fetch)
+    // Cleanup previous blob url
+    if (blobUrlRef.current) {
+      URL.revokeObjectURL(blobUrlRef.current);
+      blobUrlRef.current = "";
+    }
+
+    const objUrl = await toPlayableObjectUrl(url, abortRef.current?.signal);
+    blobUrlRef.current = objUrl;
+    setPlayableUrl(objUrl);
+
+    setFilename(pickFilename(result));
+  }
+
   async function onGenerate() {
     setError("");
-    setPublicUrl("");
+    setRemoteUrl("");
+    setPlayableUrl("");
     setFilename("");
     setJobId("");
     setStatusText("");
@@ -162,6 +207,12 @@ export default function MusicPage() {
     abortRef.current?.abort();
     abortRef.current = new AbortController();
     stopPolling();
+
+    // cleanup old blob
+    if (blobUrlRef.current) {
+      URL.revokeObjectURL(blobUrlRef.current);
+      blobUrlRef.current = "";
+    }
 
     try {
       setStep("starting");
@@ -179,10 +230,7 @@ export default function MusicPage() {
       setStatusText(st);
 
       if (st === "done") {
-        const url = pickPublicUrl(first.result);
-        if (!url) throw new Error("Job done but missing publicUrl");
-        setPublicUrl(url);
-        setFilename(pickFilename(first.result));
+        await setFinalResult(first.result);
         setStep("done");
         return;
       }
@@ -199,12 +247,9 @@ export default function MusicPage() {
           setStatusText(status);
 
           if (status === "done") {
-            const url = pickPublicUrl(s.result);
-            if (!url) throw new Error("Job done but missing publicUrl");
-            setPublicUrl(url);
-            setFilename(pickFilename(s.result));
-            setStep("done");
             stopPolling();
+            await setFinalResult(s.result);
+            setStep("done");
           } else if (status === "error") {
             stopPolling();
             setStep("error");
@@ -229,6 +274,55 @@ export default function MusicPage() {
     stopPolling();
     setStep("idle");
     setStatusText("");
+  }
+
+  async function onPlay() {
+    setError("");
+    try {
+      // If playable already exists, nothing to do
+      if (playableUrl) return;
+
+      if (!remoteUrl) throw new Error("Missing remoteUrl for audio");
+
+      // create playable url
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = "";
+      }
+
+      const objUrl = await toPlayableObjectUrl(remoteUrl, abortRef.current?.signal);
+      blobUrlRef.current = objUrl;
+      setPlayableUrl(objUrl);
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    }
+  }
+
+  async function onDownload() {
+    setError("");
+    try {
+      // Prefer playable blob; if not available, create it
+      let url = playableUrl;
+
+      if (!url) {
+        if (!remoteUrl) throw new Error("Missing remoteUrl for download");
+        url = await toPlayableObjectUrl(remoteUrl, abortRef.current?.signal);
+
+        // keep it so Play works too
+        if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = url;
+        setPlayableUrl(url);
+      }
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename || `avatar-g-${Date.now()}.mp3`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    }
   }
 
   return (
@@ -304,31 +398,49 @@ export default function MusicPage() {
             </div>
           )}
 
-          {publicUrl && (
+          {(remoteUrl || playableUrl) && step === "done" && (
             <div className="mt-5 rounded-2xl border border-white/10 bg-black/25 p-4">
               <div className="text-xs text-white/60 mb-2">Final MP3</div>
-              <audio controls className="w-full" src={publicUrl} />
+
+              {/* FIX: use playableUrl (blob) not remote signed url */}
+              <audio controls className="w-full" src={playableUrl || undefined} />
+
               <div className="mt-3 flex flex-wrap gap-3">
-                <a
-                  href={publicUrl}
-                  target="_blank"
-                  rel="noreferrer"
+                <button
+                  onClick={onPlay}
                   className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm hover:bg-white/10"
                 >
-                  Open
-                </a>
-                <a
-                  href={publicUrl}
-                  download={filename || `avatar-g-${Date.now()}.mp3`}
+                  Prepare / Play
+                </button>
+
+                <button
+                  onClick={onDownload}
                   className="rounded-xl border border-white/10 bg-emerald-500/15 px-4 py-2 text-sm text-emerald-200 hover:bg-emerald-500/25"
                 >
                   Download
-                </a>
+                </button>
+
+                {remoteUrl && (
+                  <a
+                    href={remoteUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm hover:bg-white/10"
+                  >
+                    Open remote
+                  </a>
+                )}
               </div>
+
+              {remoteUrl && (
+                <div className="mt-3 text-xs text-white/50 break-all">
+                  remoteUrl: {remoteUrl}
+                </div>
+              )}
             </div>
           )}
         </div>
       </div>
     </div>
   );
-  }
+}
