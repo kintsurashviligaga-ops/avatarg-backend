@@ -15,7 +15,7 @@ function getAllowedOrigins() {
     .filter(Boolean);
 }
 
-function corsHeaders(origin: string | null) {
+function corsHeaders(origin) {
   const allowed = getAllowedOrigins();
   const isAllowed = origin && allowed.includes(origin);
 
