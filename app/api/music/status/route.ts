@@ -9,21 +9,22 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-function pickPath(job: any): string {
+// 👇 ყველა შესაძლო path ველის ამოღება
+function pickStoragePath(job: any): string {
   return (
-    job?.audio_path ||
-    job?.audioPath ||
-    job?.file_path ||
-    job?.filePath ||
-    job?.path ||
-    job?.storage_path ||
-    job?.storagePath ||
+    job.audio_path ||
+    job.audioPath ||
+    job.file_path ||
+    job.filePath ||
+    job.storage_path ||
+    job.storagePath ||
+    job.path ||
     ""
   );
 }
 
-function makePublicUrl(path: string): string {
-  // bucket: music (PUBLIC)
+function buildPublicUrl(path: string): string {
+  if (!path) return "";
   const { data } = supabase.storage.from("music").getPublicUrl(path);
   return data?.publicUrl || "";
 }
@@ -46,47 +47,39 @@ export async function GET(req: Request) {
       .eq("id", id)
       .single();
 
-    if (error) {
-      console.error("❌ Supabase error:", error);
+    if (error || !data) {
       return NextResponse.json(
-        { ok: false, error: "job_not_found", details: error.message },
+        { ok: false, error: "job_not_found" },
         { status: 404 }
       );
     }
 
-    if (!data) {
-      return NextResponse.json({ ok: false, error: "job_empty" }, { status: 404 });
-    }
+    // 🔑 აქ არის მთავარი ფიქსი
+    const storagePath = pickStoragePath(data);
+    const publicUrl = buildPublicUrl(storagePath);
 
-    // ✅ Convert stored path -> PUBLIC URL (NO signed urls)
-    const path = pickPath(data);
-    const publicUrl = path ? makePublicUrl(path) : "";
-
-    // ✅ Normalize response for UI compatibility
     const result = {
       ...data,
-      publicUrl: publicUrl || data.publicUrl || data.public_url || data.url || data.fileUrl || null,
-      public_url: publicUrl || data.public_url || null,
-      url: publicUrl || data.url || null,
-      fileUrl: publicUrl || data.fileUrl || null,
-      filename: data.filename || (path ? path.split("/").pop() : null),
+      status: data.status,
+      publicUrl,
+      public_url: publicUrl, // legacy support
+      url: publicUrl,
+      fileUrl: publicUrl,
+      filename:
+        data.filename || (storagePath ? storagePath.split("/").pop() : null),
       errorMessage: data.error_message || data.errorMessage || null,
       updatedAt: data.updated_at || data.updatedAt || null,
     };
 
     return NextResponse.json({
       ok: true,
-      job: result,
       result,
+      job: result, // backward compatibility
     });
   } catch (err: any) {
-    console.error("🔥 STATUS API CRASH:", err);
+    console.error("🔥 STATUS API ERROR:", err);
     return NextResponse.json(
-      {
-        ok: false,
-        error: "internal_error",
-        message: err?.message ?? String(err),
-      },
+      { ok: false, error: "internal_error", message: String(err) },
       { status: 500 }
     );
   }
