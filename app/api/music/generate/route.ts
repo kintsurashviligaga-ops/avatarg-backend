@@ -3,13 +3,19 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export const runtime = "nodejs";
 
+/**
+ * ✅ CORS FIX:
+ * - If you want credentials: CANNOT use "*"
+ * - We allow only specific origin (NEXT_PUBLIC_FRONTEND_ORIGIN) or echo request origin
+ */
 function corsHeaders(origin?: string | null) {
-  const allowed = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN
-    ? process.env.NEXT_PUBLIC_FRONTEND_ORIGIN
-    : "*";
+  const allowed = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "";
+
+  // If you didn't set allowed origin, fall back to request origin (still not "*")
+  const allowOrigin = allowed || origin || "";
 
   return {
-    "Access-Control-Allow-Origin": allowed === "*" ? "*" : (origin ?? allowed),
+    "Access-Control-Allow-Origin": allowOrigin, // ✅ never "*"
     "Access-Control-Allow-Methods": "GET, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Allow-Credentials": "true",
@@ -23,9 +29,9 @@ export async function OPTIONS(req: Request) {
 }
 
 /**
- * GET /api/music/status?jobId=...
+ * GET /api/music/status?jobId=...   (supports also ?id=...)
  * Response:
- * { ok:true, job:{ id,status,prompt,public_url,audio_path,error_message,created_at,updated_at } }
+ * { ok:true, result:{ id,status,publicUrl,filename,errorMessage,updatedAt } }
  */
 export async function GET(req: Request) {
   const origin = req.headers.get("origin");
@@ -33,22 +39,22 @@ export async function GET(req: Request) {
 
   try {
     const url = new URL(req.url);
-    const jobId = (url.searchParams.get("jobId") || "").trim();
+
+    // ✅ Support both params: jobId OR id (so UI won't break)
+    const jobId = (url.searchParams.get("jobId") || url.searchParams.get("id") || "").trim();
 
     if (!jobId) {
       return NextResponse.json(
-        { ok: false, error: "jobId_required" },
+        { ok: false, error: "missing_job_id" },
         { status: 400, headers }
       );
     }
 
     const { data, error } = await supabaseAdmin
       .from("music_jobs")
-      .select(
-        "id,status,prompt,public_url,audio_path,error_message,created_at,updated_at"
-      )
+      .select("id,status,public_url,filename,error_message,updated_at")
       .eq("id", jobId)
-      .single();
+      .maybeSingle();
 
     if (error) {
       return NextResponse.json(
@@ -59,12 +65,25 @@ export async function GET(req: Request) {
 
     if (!data) {
       return NextResponse.json(
-        { ok: false, error: "not_found" },
+        { ok: false, error: "not_found", id: jobId },
         { status: 404, headers }
       );
     }
 
-    return NextResponse.json({ ok: true, job: data }, { status: 200, headers });
+    return NextResponse.json(
+      {
+        ok: true,
+        result: {
+          id: data.id,
+          status: data.status,
+          publicUrl: data.public_url,
+          filename: data.filename,
+          errorMessage: data.error_message,
+          updatedAt: data.updated_at,
+        },
+      },
+      { status: 200, headers }
+    );
   } catch (err: any) {
     console.error("GET /api/music/status failed:", err?.message ?? err);
     return NextResponse.json(
