@@ -38,7 +38,7 @@ export async function OPTIONS(req) {
   return new NextResponse(null, { status: 204, headers: corsHeaders(origin) });
 }
 
-export async function GET(req: Request) {
+export async function GET(req) {
   const origin = req.headers.get("origin");
   const res = NextResponse.json({ ok: true, service: "backend", ts: Date.now() });
   corsHeaders(origin).forEach((v, k) => res.headers.set(k, v));
