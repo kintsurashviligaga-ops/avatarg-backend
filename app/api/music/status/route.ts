@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 type JobRow = {
   id: string;
@@ -7,10 +7,23 @@ type JobRow = {
   public_url: string | null;
   filename: string | null;
   error_message: string | null;
-  updated_at?: string | null;
+  updated_at: string | null;
 };
 
-function supabaseAdmin() {
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  };
+}
+
+// ✅ cache admin client (avoid recreate each request)
+let _admin: SupabaseClient | null = null;
+
+function supabaseAdmin(): SupabaseClient {
+  if (_admin) return _admin;
+
   const url = process.env.SUPABASE_URL;
   const key =
     process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY;
@@ -19,18 +32,11 @@ function supabaseAdmin() {
     throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
   }
 
-  return createClient(url, key, {
+  _admin = createClient(url, key, {
     auth: { persistSession: false },
   });
-}
 
-// Optional CORS (თუ UI სხვა დომენიდან გიკავშირდება)
-function corsHeaders() {
-  return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-  };
+  return _admin;
 }
 
 export async function OPTIONS() {
@@ -40,7 +46,7 @@ export async function OPTIONS() {
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
-    const id = searchParams.get("id");
+    const id = searchParams.get("id")?.trim();
 
     if (!id) {
       return NextResponse.json(
@@ -51,7 +57,6 @@ export async function GET(req: Request) {
 
     const supabase = supabaseAdmin();
 
-    // ✅ ცხრილის სახელი: music_jobs
     const { data, error } = await supabase
       .from("music_jobs")
       .select("id,status,public_url,filename,error_message,updated_at")
@@ -81,7 +86,7 @@ export async function GET(req: Request) {
           publicUrl: data.public_url,
           filename: data.filename,
           errorMessage: data.error_message,
-          updatedAt: data.updated_at ?? null,
+          updatedAt: data.updated_at,
         },
       },
       { status: 200, headers: corsHeaders() }
