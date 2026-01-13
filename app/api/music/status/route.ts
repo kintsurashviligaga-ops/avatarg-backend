@@ -9,22 +9,37 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// 👇 ყველა შესაძლო path ველის ამოღება
-function pickStoragePath(job: any): string {
+// DB-ში შეიძლება სხვადასხვა ველზე ეწეროს mp3 path/url — აქედან ამოვიღებთ
+function pickStoragePath(row: any): string {
   return (
-    job.audio_path ||
-    job.audioPath ||
-    job.file_path ||
-    job.filePath ||
-    job.storage_path ||
-    job.storagePath ||
-    job.path ||
+    row?.audio_path ||
+    row?.audioPath ||
+    row?.file_path ||
+    row?.filePath ||
+    row?.storage_path ||
+    row?.storagePath ||
+    row?.path ||
+    row?.object_path ||
+    row?.objectPath ||
     ""
   );
 }
 
-function buildPublicUrl(path: string): string {
+function pickAnyUrl(row: any): string {
+  return (
+    row?.publicUrl ||
+    row?.public_url ||
+    row?.fileUrl ||
+    row?.url ||
+    row?.audio_url ||
+    row?.audioUrl ||
+    ""
+  );
+}
+
+function buildPublicUrlFromPath(path: string): string {
   if (!path) return "";
+  // bucket = "music" (თქვენს შემთხვევაში)
   const { data } = supabase.storage.from("music").getPublicUrl(path);
   return data?.publicUrl || "";
 }
@@ -48,38 +63,47 @@ export async function GET(req: Request) {
       .single();
 
     if (error || !data) {
+      console.error("❌ Supabase error:", error);
       return NextResponse.json(
-        { ok: false, error: "job_not_found" },
+        { ok: false, error: "job_not_found", details: error?.message ?? null },
         { status: 404 }
       );
     }
 
-    // 🔑 აქ არის მთავარი ფიქსი
-    const storagePath = pickStoragePath(data);
-    const publicUrl = buildPublicUrl(storagePath);
+    // 1) ჯერ DB-ში თუ უკვე არის url/publicUrl — ავიღოთ
+    const existingUrl = pickAnyUrl(data);
 
+    // 2) თუ არ არის, მაშინ path-იდან ავაგოთ PUBLIC URL
+    const storagePath = pickStoragePath(data);
+    const publicUrl = existingUrl || buildPublicUrlFromPath(storagePath);
+
+    // 3) result-ში დავაბრუნოთ ყველა compatibility ველი, რომ UI-მ ყოველთვის დაიჭიროს
     const result = {
       ...data,
-      status: data.status,
-      publicUrl,
-      public_url: publicUrl, // legacy support
-      url: publicUrl,
-      fileUrl: publicUrl,
+      publicUrl: publicUrl || null,
+      public_url: publicUrl || null,
+      url: publicUrl || null,
+      fileUrl: publicUrl || null,
       filename:
-        data.filename || (storagePath ? storagePath.split("/").pop() : null),
-      errorMessage: data.error_message || data.errorMessage || null,
-      updatedAt: data.updated_at || data.updatedAt || null,
+        data?.filename ||
+        (storagePath ? String(storagePath).split("/").pop() : null),
+      errorMessage: data?.error_message || data?.errorMessage || null,
+      updatedAt: data?.updated_at || data?.updatedAt || null,
     };
 
     return NextResponse.json({
       ok: true,
+      job: result,
       result,
-      job: result, // backward compatibility
     });
   } catch (err: any) {
-    console.error("🔥 STATUS API ERROR:", err);
+    console.error("🔥 STATUS API CRASH:", err);
     return NextResponse.json(
-      { ok: false, error: "internal_error", message: String(err) },
+      {
+        ok: false,
+        error: "internal_error",
+        message: err?.message ?? String(err),
+      },
       { status: 500 }
     );
   }
