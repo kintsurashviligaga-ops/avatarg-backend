@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
+export const runtime = "nodejs";
+
 type JobRow = {
   id: string;
   status: "queued" | "processing" | "done" | "error" | string;
@@ -10,11 +12,18 @@ type JobRow = {
   updated_at: string | null;
 };
 
-function corsHeaders() {
+function corsHeaders(origin?: string | null) {
+  const allowed = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "*";
+  const o = origin || "";
+
+  // ✅ If you keep "*", do NOT use credentials
+  const allowOrigin = allowed === "*" ? "*" : allowed;
+
   return {
-    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Origin": allowOrigin === "*" ? "*" : o || allowOrigin,
     "Access-Control-Allow-Methods": "GET,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    Vary: "Origin",
   };
 }
 
@@ -32,18 +41,20 @@ function supabaseAdmin(): SupabaseClient {
     throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
   }
 
-  _admin = createClient(url, key, {
-    auth: { persistSession: false },
-  });
-
+  _admin = createClient(url, key, { auth: { persistSession: false } });
   return _admin;
 }
 
-export async function OPTIONS() {
-  return new NextResponse(null, { status: 204, headers: corsHeaders() });
+export async function OPTIONS(req: Request) {
+  return new NextResponse(null, {
+    status: 204,
+    headers: corsHeaders(req.headers.get("origin")),
+  });
 }
 
 export async function GET(req: Request) {
+  const headers = corsHeaders(req.headers.get("origin"));
+
   try {
     const { searchParams } = new URL(req.url);
     const id = searchParams.get("id")?.trim();
@@ -51,7 +62,7 @@ export async function GET(req: Request) {
     if (!id) {
       return NextResponse.json(
         { ok: false, error: "Missing ?id=JOB_ID" },
-        { status: 400, headers: corsHeaders() }
+        { status: 400, headers }
       );
     }
 
@@ -66,14 +77,14 @@ export async function GET(req: Request) {
     if (error) {
       return NextResponse.json(
         { ok: false, error: error.message },
-        { status: 500, headers: corsHeaders() }
+        { status: 500, headers }
       );
     }
 
     if (!data) {
       return NextResponse.json(
         { ok: false, error: "Job not found", id },
-        { status: 404, headers: corsHeaders() }
+        { status: 404, headers }
       );
     }
 
@@ -89,12 +100,12 @@ export async function GET(req: Request) {
           updatedAt: data.updated_at,
         },
       },
-      { status: 200, headers: corsHeaders() }
+      { status: 200, headers }
     );
   } catch (e: any) {
     return NextResponse.json(
       { ok: false, error: e?.message ?? String(e) },
-      { status: 500, headers: corsHeaders() }
+      { status: 500, headers }
     );
   }
 }
