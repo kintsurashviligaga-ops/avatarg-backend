@@ -1,19 +1,46 @@
 import { NextResponse } from "next/server";
-import { withCORS, corsOPTIONS } from "../utils/cors";
 
-export async function GET(req) {
-  return withCORS(
-    req,
-    NextResponse.json({
-      status: "ok",
-      service: "Avatar G Backend",
-      version: "1.0.0",
-      time: new Date().toISOString(),
-      env: process.env.NODE_ENV || "unknown",
-    })
-  );
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+function getAllowedOrigins() {
+  const raw =
+    process.env.CORS_ALLOW_ORIGINS ||
+    process.env.FRONTEND_ORIGIN ||
+    process.env.NEXT_PUBLIC_FRONTEND_ORIGIN ||
+    "";
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
-export async function OPTIONS(req) {
-  return corsOPTIONS(req);
+function corsHeaders(origin: string | null) {
+  const allowed = getAllowedOrigins();
+  const isAllowed = origin && allowed.includes(origin);
+
+  const headers = new Headers();
+  if (isAllowed) headers.set("Access-Control-Allow-Origin", origin!);
+
+  headers.set("Vary", "Origin");
+  headers.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  headers.set(
+    "Access-Control-Allow-Credentials",
+    (process.env.CORS_ALLOW_CREDENTIALS || "true").toLowerCase()
+  );
+
+  return headers;
+}
+
+export async function OPTIONS(req: Request) {
+  const origin = req.headers.get("origin");
+  return new NextResponse(null, { status: 204, headers: corsHeaders(origin) });
+}
+
+export async function GET(req: Request) {
+  const origin = req.headers.get("origin");
+  const res = NextResponse.json({ ok: true, service: "backend", ts: Date.now() });
+  corsHeaders(origin).forEach((v, k) => res.headers.set(k, v));
+  return res;
 }
