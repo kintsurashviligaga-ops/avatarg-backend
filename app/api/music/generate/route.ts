@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-
 export const runtime = "nodejs";
+
 /**
  * CORS:
  * - If you use credentials, you MUST NOT use "*"
