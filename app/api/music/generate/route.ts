@@ -4,32 +4,41 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
 export const runtime = "nodejs";
 
 /**
- * ✅ CORS FIX:
- * - If you want credentials: CANNOT use "*"
- * - We allow only specific origin (NEXT_PUBLIC_FRONTEND_ORIGIN) or echo request origin
+ * CORS:
+ * - If you use credentials, you MUST NOT use "*"
+ * - We set Allow-Origin only when we have an origin to echo OR a configured allowed origin.
+ * - For same-origin requests, CORS headers don't matter, but returning empty origin can break some clients.
  */
 function corsHeaders(origin?: string | null) {
-  const allowed = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "";
+  const allowed = (process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "").trim();
 
-  // If you didn't set allowed origin, fall back to request origin (still not "*")
-  const allowOrigin = allowed || origin || "";
+  // Prefer explicit allowed origin; else echo request origin; else fall back to "*"
+  const allowOrigin = allowed || origin || "*";
 
-  return {
-    "Access-Control-Allow-Origin": allowOrigin, // ✅ never "*"
+  const headers: Record<string, string> = {
+    "Access-Control-Allow-Origin": allowOrigin,
     "Access-Control-Allow-Methods": "GET, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Allow-Credentials": "true",
     Vary: "Origin",
   };
+
+  // Only set credentials when origin is NOT "*"
+  if (allowOrigin !== "*") {
+    headers["Access-Control-Allow-Credentials"] = "true";
+  }
+
+  return headers;
 }
 
 export async function OPTIONS(req: Request) {
-  const origin = req.headers.get("origin");
-  return new Response(null, { status: 204, headers: corsHeaders(origin) });
+  return new Response(null, {
+    status: 204,
+    headers: corsHeaders(req.headers.get("origin")),
+  });
 }
 
 /**
- * GET /api/music/status?jobId=...   (supports also ?id=...)
+ * GET /api/music/status?jobId=... (supports also ?id=...)
  * Response:
  * { ok:true, result:{ id,status,publicUrl,filename,errorMessage,updatedAt } }
  */
@@ -40,7 +49,7 @@ export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
 
-    // ✅ Support both params: jobId OR id (so UI won't break)
+    // Support both: jobId OR id
     const jobId = (url.searchParams.get("jobId") || url.searchParams.get("id") || "").trim();
 
     if (!jobId) {
