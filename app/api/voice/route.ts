@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
-import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { supabaseAdmin } from "../../../lib/supabaseAdmin";
 
 export const runtime = "nodejs";
 
 /* ----------------------------- CORS ----------------------------- */
 function corsHeaders(origin?: string | null) {
-  const allowed = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "*";
-  const o = origin || "";
+  const allowed = (process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "*").trim();
+  const o = (origin || "").trim();
 
   // ✅ If credentials=true, "*" is not allowed
   const allowOrigin = allowed === "*" ? (o || "*") : allowed;
@@ -18,7 +18,7 @@ function corsHeaders(origin?: string | null) {
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     ...(useCredentials ? { "Access-Control-Allow-Credentials": "true" } : {}),
     Vary: "Origin",
-  };
+  } as Record<string, string>;
 }
 
 export async function OPTIONS(req: Request) {
@@ -90,7 +90,11 @@ export async function POST(req: Request) {
   } catch (err: any) {
     console.error("Voice API error:", err);
     return NextResponse.json(
-      { ok: false, error: "Internal server error", details: err?.message ?? String(err) },
+      {
+        ok: false,
+        error: "Internal server error",
+        details: err?.message ?? String(err),
+      },
       { status: 500, headers }
     );
   }
