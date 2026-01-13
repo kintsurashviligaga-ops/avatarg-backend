@@ -8,12 +8,8 @@ function corsHeaders(origin?: string | null) {
   const allowed = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "*";
   const o = origin || "";
 
-  // ✅ If credentials=true, we MUST NOT use "*"
-  const allowOrigin =
-    allowed === "*"
-      ? o || "*" // if no origin (server-to-server), ok
-      : allowed;
-
+  // ✅ If credentials=true, "*" is not allowed
+  const allowOrigin = allowed === "*" ? (o || "*") : allowed;
   const useCredentials = allowOrigin !== "*";
 
   return {
@@ -32,12 +28,6 @@ export async function OPTIONS(req: Request) {
   });
 }
 
-/* ----------------------------- Helpers ----------------------------- */
-function getSupabase() {
-  // supports both: supabaseAdmin (client) OR supabaseAdmin() (factory)
-  return typeof supabaseAdmin === "function" ? (supabaseAdmin as any)() : (supabaseAdmin as any);
-}
-
 /* ----------------------------- POST ----------------------------- */
 /**
  * Creates a voice generation job.
@@ -50,9 +40,7 @@ export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => null);
 
-    const textRaw = typeof body?.text === "string" ? body.text : "";
-    const text = textRaw.trim();
-
+    const text = typeof body?.text === "string" ? body.text.trim() : "";
     if (!text || text.length < 2) {
       return NextResponse.json(
         { ok: false, error: "Missing/invalid required field: text" },
@@ -72,9 +60,7 @@ export async function POST(req: Request) {
       metadata = null,
     } = body || {};
 
-    const supabase = getSupabase();
-
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from("voice_jobs")
       .insert({
         user_id,
@@ -100,10 +86,7 @@ export async function POST(req: Request) {
       );
     }
 
-    return NextResponse.json(
-      { ok: true, job: data },
-      { status: 201, headers }
-    );
+    return NextResponse.json({ ok: true, job: data }, { status: 201, headers });
   } catch (err: any) {
     console.error("Voice API error:", err);
     return NextResponse.json(
