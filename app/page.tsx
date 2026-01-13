@@ -24,12 +24,9 @@ async function safeReadJson<T = any>(res: Response): Promise<T | null> {
   }
 }
 
-// Base64 → Uint8Array (client-safe)
+// Base64 → Uint8Array
 function base64ToUint8Array(b64: string) {
-  const clean = String(b64 || "").replace(/^data:.*;base64,/, "").trim();
-  if (!clean) return new Uint8Array();
-
-  // atob exists in browsers; file is "use client"
+  const clean = b64.replace(/^data:.*;base64,/, "");
   const binary = atob(clean);
   const out = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
@@ -43,11 +40,11 @@ function base64ToUint8Array(b64: string) {
 function uint8ToSafeArrayBuffer(u8: Uint8Array): ArrayBuffer {
   const copy = new Uint8Array(u8.byteLength);
   copy.set(u8);
-  return copy.buffer; // <- always real ArrayBuffer
+  return copy.buffer; // always real ArrayBuffer
 }
 
 /**
- * ✅ Normalize any backend "audio" into Blob safely
+ * ✅ Normalize backend "audio" into Blob safely
  * Supports: Blob, ArrayBuffer, Uint8Array, base64 string, number[]
  * If string is URL -> throws "AUDIO_URL" marker
  */
@@ -65,18 +62,15 @@ function audioToBlobSafe(audio: any, contentType = "audio/mpeg"): Blob {
     return new Blob([ab], { type: contentType });
   }
 
-  // Base64 string or URL
   if (typeof audio === "string") {
-    const s = audio.trim();
-    if (s.startsWith("http://") || s.startsWith("https://")) {
+    if (audio.startsWith("http://") || audio.startsWith("https://")) {
       throw new Error("AUDIO_URL");
     }
-    const u8 = base64ToUint8Array(s);
+    const u8 = base64ToUint8Array(audio);
     const ab = uint8ToSafeArrayBuffer(u8);
     return new Blob([ab], { type: contentType });
   }
 
-  // number[] (JSON array of bytes)
   if (Array.isArray(audio) && audio.every((x) => typeof x === "number")) {
     const u8 = new Uint8Array(audio);
     const ab = uint8ToSafeArrayBuffer(u8);
@@ -125,11 +119,7 @@ async function generateFinalSong(prompt: string): Promise<{
   if (!ctHeader.includes("application/json")) {
     const ab = await composeRes.arrayBuffer();
     contentType = ctHeader || "audio/mpeg";
-    return {
-      blob: new Blob([ab], { type: contentType }),
-      filename,
-      contentType,
-    };
+    return { blob: new Blob([ab], { type: contentType }), filename, contentType };
   }
 
   // Case B: backend returns JSON
@@ -148,11 +138,7 @@ async function generateFinalSong(prompt: string): Promise<{
     const ab = await audioRes.arrayBuffer();
     const ct2 = audioRes.headers.get("content-type");
     contentType = ct2 || contentType;
-    return {
-      blob: new Blob([ab], { type: contentType }),
-      filename,
-      contentType,
-    };
+    return { blob: new Blob([ab], { type: contentType }), filename, contentType };
   }
 
   // Try normal audio fields
@@ -162,7 +148,6 @@ async function generateFinalSong(prompt: string): Promise<{
     const blob = audioToBlobSafe(audioAny, contentType);
     return { blob, filename, contentType };
   } catch (e: any) {
-    // URL marker fallback
     if (String(e?.message) === "AUDIO_URL" && typeof audioAny === "string") {
       const audioRes = await fetch(audioAny);
       if (!audioRes.ok) {
@@ -172,11 +157,7 @@ async function generateFinalSong(prompt: string): Promise<{
       const ab = await audioRes.arrayBuffer();
       const ct2 = audioRes.headers.get("content-type");
       contentType = ct2 || contentType;
-      return {
-        blob: new Blob([ab], { type: contentType }),
-        filename,
-        contentType,
-      };
+      return { blob: new Blob([ab], { type: contentType }), filename, contentType };
     }
     throw e;
   }
@@ -248,9 +229,7 @@ export default function MusicPage() {
       if (!uploadRes.ok) {
         const t = await safeReadText(uploadRes);
         setStep("done");
-        setError(
-          `Upload failed (but local preview works): ${uploadRes.status}\n${t}`
-        );
+        setError(`Upload failed (but local preview works): ${uploadRes.status}\n${t}`);
         return;
       }
 
@@ -270,9 +249,7 @@ export default function MusicPage() {
       <div className="mx-auto max-w-3xl p-4 sm:p-6">
         <div className="rounded-2xl border border-white/10 bg-white/5 p-4 sm:p-6 shadow-lg">
           <div className="flex items-center justify-between gap-3">
-            <h1 className="text-lg sm:text-xl font-semibold">
-              🎶 Music Generator
-            </h1>
+            <h1 className="text-lg sm:text-xl font-semibold">🎶 Music Generator</h1>
             <span
               className={cx(
                 "text-xs px-2 py-1 rounded-full border",
@@ -355,4 +332,4 @@ export default function MusicPage() {
       </div>
     </div>
   );
-  }
+}
