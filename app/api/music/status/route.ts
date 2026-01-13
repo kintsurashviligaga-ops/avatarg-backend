@@ -1,63 +1,39 @@
 import { NextResponse } from "next/server";
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export const runtime = "nodejs";
 
-type JobRow = {
-  id: string;
-  status: "queued" | "processing" | "done" | "error" | string;
-  public_url: string | null;
-  filename: string | null;
-  error_message: string | null;
-  updated_at: string | null;
-};
-
 function corsHeaders(origin?: string | null) {
-  const allowed = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "*";
-  const o = origin || "";
-
-  // ✅ If you keep "*", do NOT use credentials
-  const allowOrigin = allowed === "*" ? "*" : allowed;
+  const allowed = process.env.NEXT_PUBLIC_FRONTEND_ORIGIN ?? "*";
 
   return {
-    "Access-Control-Allow-Origin": allowOrigin === "*" ? "*" : o || allowOrigin,
-    "Access-Control-Allow-Methods": "GET,OPTIONS",
+    "Access-Control-Allow-Origin": allowed === "*" ? "*" : origin || allowed,
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Credentials": "true",
     Vary: "Origin",
   };
 }
 
-// ✅ cache admin client (avoid recreate each request)
-let _admin: SupabaseClient | null = null;
-
-function supabaseAdmin(): SupabaseClient {
-  if (_admin) return _admin;
-
-  const url = process.env.SUPABASE_URL;
-  const key =
-    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY;
-
-  if (!url || !key) {
-    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-  }
-
-  _admin = createClient(url, key, { auth: { persistSession: false } });
-  return _admin;
-}
-
 export async function OPTIONS(req: Request) {
-  return new NextResponse(null, {
+  return new Response(null, {
     status: 204,
     headers: corsHeaders(req.headers.get("origin")),
   });
 }
 
+/**
+ * GET /api/music/status?id=JOB_ID
+ * Response:
+ * { ok:true, result:{ id,status,publicUrl,filename,errorMessage,updatedAt } }
+ */
 export async function GET(req: Request) {
-  const headers = corsHeaders(req.headers.get("origin"));
+  const origin = req.headers.get("origin");
+  const headers = corsHeaders(origin);
 
   try {
-    const { searchParams } = new URL(req.url);
-    const id = searchParams.get("id")?.trim();
+    const url = new URL(req.url);
+    const id = (url.searchParams.get("id") || "").trim();
 
     if (!id) {
       return NextResponse.json(
@@ -66,13 +42,11 @@ export async function GET(req: Request) {
       );
     }
 
-    const supabase = supabaseAdmin();
-
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from("music_jobs")
       .select("id,status,public_url,filename,error_message,updated_at")
       .eq("id", id)
-      .maybeSingle<JobRow>();
+      .maybeSingle();
 
     if (error) {
       return NextResponse.json(
@@ -83,7 +57,7 @@ export async function GET(req: Request) {
 
     if (!data) {
       return NextResponse.json(
-        { ok: false, error: "Job not found", id },
+        { ok: false, error: "Job not found" },
         { status: 404, headers }
       );
     }
@@ -97,14 +71,15 @@ export async function GET(req: Request) {
           publicUrl: data.public_url,
           filename: data.filename,
           errorMessage: data.error_message,
-          updatedAt: data.updated_at,
+          updatedAt: data.updated_at ?? null,
         },
       },
       { status: 200, headers }
     );
-  } catch (e: any) {
+  } catch (err: any) {
+    console.error("GET /api/music/status failed:", err?.message ?? err);
     return NextResponse.json(
-      { ok: false, error: e?.message ?? String(e) },
+      { ok: false, error: err?.message ?? String(err) },
       { status: 500, headers }
     );
   }
