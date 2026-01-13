@@ -9,75 +9,43 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-function getAudioPath(row: any): string | null {
-  return (
-    row?.audio_path ||
-    row?.file_path ||
-    row?.storage_path ||
-    row?.path ||
-    null
-  );
+function getPublicUrl(path: string | null) {
+  if (!path) return null;
+  const { data } = supabase.storage.from("music").getPublicUrl(path);
+  return data?.publicUrl ?? null;
 }
 
-export async function GET(req: Request) {
+export async function GET() {
   try {
-    const { searchParams } = new URL(req.url);
-    const id = searchParams.get("id");
-
-    if (!id) {
-      return NextResponse.json(
-        { ok: false, error: "missing_job_id" },
-        { status: 400 }
-      );
-    }
-
     const { data, error } = await supabase
       .from("music_jobs")
       .select("*")
-      .eq("id", id)
-      .single();
+      .order("created_at", { ascending: false })
+      .limit(20);
 
-    if (error || !data) {
-      return NextResponse.json(
-        { ok: false, error: "job_not_found" },
-        { status: 404 }
-      );
+    if (error) {
+      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
     }
 
-    let publicUrl: string | null = null;
-    const audioPath = getAudioPath(data);
+    const rows = (data ?? []).map((row: any) => {
+      const audioPath =
+        row?.audio_path || row?.file_path || row?.storage_path || row?.path || null;
 
-    if (audioPath) {
-      const { data: urlData } = supabase
-        .storage
-        .from("music")
-        .getPublicUrl(audioPath);
+      const publicUrl = getPublicUrl(audioPath);
 
-      publicUrl = urlData?.publicUrl ?? null;
-    }
-
-    const result = {
-      ...data,
-      status: data.status,
-      publicUrl,
-      url: publicUrl,
-      fileUrl: publicUrl,
-      filename: audioPath ? audioPath.split("/").pop() : null,
-    };
-
-    return NextResponse.json({
-      ok: true,
-      job: result,
-      result,
+      return {
+        ...row,
+        publicUrl,
+        url: publicUrl,
+        fileUrl: publicUrl,
+        filename: audioPath ? String(audioPath).split("/").pop() : null,
+      };
     });
+
+    return NextResponse.json({ ok: true, jobs: rows });
   } catch (err: any) {
-    console.error("🔥 STATUS API ERROR:", err);
     return NextResponse.json(
-      {
-        ok: false,
-        error: "internal_error",
-        message: err?.message ?? String(err),
-      },
+      { ok: false, error: "internal_error", message: err?.message ?? String(err) },
       { status: 500 }
     );
   }
