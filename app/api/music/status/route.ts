@@ -9,43 +9,42 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-function getPublicUrl(path: string | null) {
-  if (!path) return null;
-  const { data } = supabase.storage.from("music").getPublicUrl(path);
-  return data?.publicUrl ?? null;
-}
-
-export async function GET() {
+export async function GET(req: Request) {
   try {
-    const { data, error } = await supabase
-      .from("music_jobs")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(20);
+    const { searchParams } = new URL(req.url);
+    const path = searchParams.get("path");
 
-    if (error) {
-      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    if (!path) {
+      return NextResponse.json(
+        { ok: false, error: "missing_path" },
+        { status: 400 }
+      );
     }
 
-    const rows = (data ?? []).map((row: any) => {
-      const audioPath =
-        row?.audio_path || row?.file_path || row?.storage_path || row?.path || null;
+    // ✅ PUBLIC bucket → პირდაპირ public URL
+    const { data } = supabase
+      .storage
+      .from("music")
+      .getPublicUrl(path);
 
-      const publicUrl = getPublicUrl(audioPath);
+    if (!data?.publicUrl) {
+      return NextResponse.json(
+        { ok: false, error: "public_url_not_found" },
+        { status: 404 }
+      );
+    }
 
-      return {
-        ...row,
-        publicUrl,
-        url: publicUrl,
-        fileUrl: publicUrl,
-        filename: audioPath ? String(audioPath).split("/").pop() : null,
-      };
-    });
+    // ✅ redirect instead of fetch
+    return NextResponse.redirect(data.publicUrl);
 
-    return NextResponse.json({ ok: true, jobs: rows });
   } catch (err: any) {
+    console.error("🔥 FILE ROUTE ERROR:", err);
     return NextResponse.json(
-      { ok: false, error: "internal_error", message: err?.message ?? String(err) },
+      {
+        ok: false,
+        error: "internal_error",
+        message: err?.message ?? String(err),
+      },
       { status: 500 }
     );
   }
