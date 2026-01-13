@@ -9,13 +9,13 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-function extractPath(row: any): string {
+function getAudioPath(row: any): string | null {
   return (
     row?.audio_path ||
     row?.file_path ||
     row?.storage_path ||
     row?.path ||
-    ""
+    null
   );
 }
 
@@ -45,14 +45,13 @@ export async function GET(req: Request) {
     }
 
     let publicUrl: string | null = null;
+    const audioPath = getAudioPath(data);
 
-    // 🔑 PUBLIC bucket URL (NO signed URL)
-    const path = extractPath(data);
-    if (path) {
+    if (audioPath) {
       const { data: urlData } = supabase
         .storage
         .from("music")
-        .getPublicUrl(path);
+        .getPublicUrl(audioPath);
 
       publicUrl = urlData?.publicUrl ?? null;
     }
@@ -63,7 +62,7 @@ export async function GET(req: Request) {
       publicUrl,
       url: publicUrl,
       fileUrl: publicUrl,
-      filename: path ? path.split("/").pop() : null,
+      filename: audioPath ? audioPath.split("/").pop() : null,
     };
 
     return NextResponse.json({
@@ -71,11 +70,14 @@ export async function GET(req: Request) {
       job: result,
       result,
     });
-
   } catch (err: any) {
     console.error("🔥 STATUS API ERROR:", err);
     return NextResponse.json(
-      { ok: false, error: "internal_error", message: err?.message },
+      {
+        ok: false,
+        error: "internal_error",
+        message: err?.message ?? String(err),
+      },
       { status: 500 }
     );
   }
