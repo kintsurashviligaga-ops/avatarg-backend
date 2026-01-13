@@ -10,6 +10,9 @@ type StatusResponse = {
     id: string;
     status: "queued" | "processing" | "done" | "error" | string;
     publicUrl?: string | null;
+    public_url?: string | null;
+    url?: string | null;
+    fileUrl?: string | null;
     filename?: string | null;
     errorMessage?: string | null;
     updatedAt?: string | null;
@@ -53,12 +56,14 @@ export default function MusicPage() {
 
   const abortRef = useRef<AbortController | null>(null);
   const pollingRef = useRef<number | null>(null);
+  const isPollingRef = useRef<boolean>(false);
 
   useEffect(() => {
     return () => {
-      // cleanup
       abortRef.current?.abort();
       if (pollingRef.current) window.clearInterval(pollingRef.current);
+      pollingRef.current = null;
+      isPollingRef.current = false;
     };
   }, []);
 
@@ -67,6 +72,25 @@ export default function MusicPage() {
     const busy = step === "starting" || step === "waiting";
     return okPrompt && !busy;
   }, [prompt, step]);
+
+  function stopPolling() {
+    if (pollingRef.current) {
+      window.clearInterval(pollingRef.current);
+      pollingRef.current = null;
+    }
+    isPollingRef.current = false;
+  }
+
+  function extractUrl(s: StatusResponse): string {
+    const r = s.result || {};
+    return (
+      (r.publicUrl as string) ||
+      (r.public_url as string) ||
+      (r.fileUrl as string) ||
+      (r.url as string) ||
+      ""
+    );
+  }
 
   async function startJob(p: string): Promise<string> {
     const res = await fetch("/api/music/generate", {
@@ -88,7 +112,12 @@ export default function MusicPage() {
     }
 
     const data = (await safeJson<any>(res)) || {};
-    const id = data.jobId || data.id || data?.result?.jobId || data?.result?.id;
+    const id =
+      data.jobId ||
+      data.id ||
+      data?.result?.jobId ||
+      data?.result?.id ||
+      data?.result?.job_id;
 
     if (!id || typeof id !== "string") {
       throw new Error(
@@ -119,13 +148,6 @@ export default function MusicPage() {
     return data;
   }
 
-  function stopPolling() {
-    if (pollingRef.current) {
-      window.clearInterval(pollingRef.current);
-      pollingRef.current = null;
-    }
-  }
-
   async function onGenerate() {
     setError("");
     setPublicUrl("");
@@ -133,10 +155,9 @@ export default function MusicPage() {
     setJobId("");
     setStatusText("");
 
-    // abort previous
+    // abort previous + stop polling
     abortRef.current?.abort();
     abortRef.current = new AbortController();
-
     stopPolling();
 
     try {
@@ -149,13 +170,13 @@ export default function MusicPage() {
       setStep("waiting");
       setStatusText("queued");
 
-      // Immediately check once
+      // First check
       const first = await fetchStatus(id);
       const st = first.result?.status || "queued";
       setStatusText(st);
 
       if (st === "done") {
-        const url = first.result?.publicUrl || "";
+        const url = extractUrl(first);
         if (!url) throw new Error("Job done but missing publicUrl");
         setPublicUrl(url);
         setFilename(first.result?.filename || `avatar-g-${Date.now()}.mp3`);
@@ -164,18 +185,21 @@ export default function MusicPage() {
       }
 
       if (st === "error") {
-        throw new Error(first.result?.errorMessage || "Music job failed");
+        throw new Error(first.result?.errorMessage || first.error || "Music job failed");
       }
 
-      // Poll every 2 seconds
+      // Poll
+      isPollingRef.current = true;
       pollingRef.current = window.setInterval(async () => {
+        if (!isPollingRef.current) return;
+
         try {
           const s = await fetchStatus(id);
           const status = s.result?.status || "queued";
           setStatusText(status);
 
           if (status === "done") {
-            const url = s.result?.publicUrl || "";
+            const url = extractUrl(s);
             if (!url) throw new Error("Job done but missing publicUrl");
             setPublicUrl(url);
             setFilename(s.result?.filename || `avatar-g-${Date.now()}.mp3`);
@@ -187,7 +211,6 @@ export default function MusicPage() {
             setError(s.result?.errorMessage || s.error || "Music job failed");
           }
         } catch (e: any) {
-          // If aborted, ignore
           if (e?.name === "AbortError") return;
           stopPolling();
           setStep("error");
@@ -196,6 +219,7 @@ export default function MusicPage() {
       }, 2000);
     } catch (e: any) {
       if (e?.name === "AbortError") return;
+      stopPolling();
       setStep("error");
       setError(e?.message ?? String(e));
     }
@@ -230,8 +254,7 @@ export default function MusicPage() {
           </div>
 
           <p className="mt-2 text-sm text-white/70">
-            Prompt ჩაწერე → Generate. სისტემა შექმნის jobId-ს და ავტომატურად დაელოდება
-            დასრულებას. (კოდი აღარ გამოჩნდება ჩათში.)
+            Prompt ჩაწერე → Generate. სისტემა შექმნის jobId-ს და ავტომატურად დაელოდება დასრულებას.
           </p>
 
           <div className="mt-4">
@@ -309,4 +332,4 @@ export default function MusicPage() {
       </div>
     </div>
   );
-}
+        }
