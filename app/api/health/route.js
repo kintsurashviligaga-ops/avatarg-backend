@@ -33,7 +33,7 @@ function corsHeaders(origin) {
   return headers;
 }
 
-export async function OPTIONS(req: Request) {
+export async function OPTIONS(req) {
   const origin = req.headers.get("origin");
   return new NextResponse(null, { status: 204, headers: corsHeaders(origin) });
 }
