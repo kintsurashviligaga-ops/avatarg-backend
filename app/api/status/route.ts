@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { supabaseAdmin } from "../../../lib/supabaseAdmin";
+import { supabaseAdmin } from "../../src/lib/supabaseAdmin";
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
