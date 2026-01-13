@@ -24,9 +24,12 @@ async function safeReadJson<T = any>(res: Response): Promise<T | null> {
   }
 }
 
-// Base64 → Uint8Array
+// Base64 → Uint8Array (client-safe)
 function base64ToUint8Array(b64: string) {
-  const clean = b64.replace(/^data:.*;base64,/, "");
+  const clean = String(b64 || "").replace(/^data:.*;base64,/, "").trim();
+  if (!clean) return new Uint8Array();
+
+  // atob exists in browsers; file is "use client"
   const binary = atob(clean);
   const out = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
@@ -64,10 +67,11 @@ function audioToBlobSafe(audio: any, contentType = "audio/mpeg"): Blob {
 
   // Base64 string or URL
   if (typeof audio === "string") {
-    if (audio.startsWith("http://") || audio.startsWith("https://")) {
+    const s = audio.trim();
+    if (s.startsWith("http://") || s.startsWith("https://")) {
       throw new Error("AUDIO_URL");
     }
-    const u8 = base64ToUint8Array(audio);
+    const u8 = base64ToUint8Array(s);
     const ab = uint8ToSafeArrayBuffer(u8);
     return new Blob([ab], { type: contentType });
   }
@@ -351,4 +355,4 @@ export default function MusicPage() {
       </div>
     </div>
   );
-  }
+}
