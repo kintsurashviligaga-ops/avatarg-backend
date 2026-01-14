@@ -1,78 +1,89 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+function corsHeaders(origin?: string | null) {
+  const allowed = (process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "").trim();
+  const allowOrigin = allowed || origin || "*";
 
-// Minimal path sanitize: disallow schemes, backslashes, "..", and absolute urls
-function sanitizePath(input: string): string | null {
-  const p = input.trim();
+  const headers: Record<string, string> = {
+    "Access-Control-Allow-Origin": allowOrigin,
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    Vary: "Origin",
+  };
 
-  if (!p) return null;
-  if (p.length > 512) return null;
-
-  // block absolute urls / schemes
-  if (/^[a-zA-Z]+:\/\//.test(p)) return null;
-
-  // block traversal and weird separators
-  if (p.includes("..")) return null;
-  if (p.includes("\\")) return null;
-
-  // optional: allow only common chars (safe)
-  // jobs/uuid.mp3 → ok
-  if (!/^[a-zA-Z0-9/_\-.]+$/.test(p)) return null;
-
-  return p;
+  if (allowOrigin !== "*") headers["Access-Control-Allow-Credentials"] = "true";
+  return headers;
 }
 
+export async function OPTIONS(req: Request) {
+  return new Response(null, {
+    status: 204,
+    headers: corsHeaders(req.headers.get("origin")),
+  });
+}
+
+/**
+ * GET /api/music/status?id=...  (supports also ?jobId=...)
+ * აბრუნებს JSON სტატუსს UI-სთვის
+ */
 export async function GET(req: Request) {
+  const origin = req.headers.get("origin");
+  const headers = corsHeaders(origin);
+
   try {
-    const { searchParams } = new URL(req.url);
-    const rawPath = searchParams.get("path");
+    const url = new URL(req.url);
+    const jobId = (url.searchParams.get("jobId") || url.searchParams.get("id") || "").trim();
 
-    if (!rawPath) {
-      return NextResponse.json({ ok: false, error: "missing_path" }, { status: 400 });
+    if (!jobId) {
+      return NextResponse.json(
+        { ok: false, error: "missing_job_id" },
+        { status: 400, headers }
+      );
     }
 
-    const path = sanitizePath(rawPath);
-    if (!path) {
-      return NextResponse.json({ ok: false, error: "invalid_path" }, { status: 400 });
+    const { data, error } = await supabaseAdmin
+      .from("music_jobs")
+      .select("id,status,public_url,filename,error_message,updated_at")
+      .eq("id", jobId)
+      .maybeSingle();
+
+    if (error) {
+      return NextResponse.json(
+        { ok: false, error: "db_read_failed", details: error.message },
+        { status: 500, headers }
+      );
     }
 
-    // ✅ PUBLIC bucket → direct public URL
-    const { data } = supabase.storage.from("music").getPublicUrl(path);
-    const publicUrl = data?.publicUrl;
-
-    if (!publicUrl) {
-      return NextResponse.json({ ok: false, error: "public_url_not_found" }, { status: 404 });
+    if (!data) {
+      return NextResponse.json(
+        { ok: false, error: "not_found", id: jobId },
+        { status: 404, headers }
+      );
     }
 
-    // ✅ redirect for browser audio/download (no fetch issues)
-    // Use 302 to avoid caching old urls; plus explicit no-store headers.
-    const res = NextResponse.redirect(publicUrl, { status: 302 });
-
-    res.headers.set("Cache-Control", "no-store, max-age=0");
-    res.headers.set("Pragma", "no-cache");
-
-    // helpful for debugging in Network tab
-    res.headers.set("X-AvatarG-Storage", "supabase-public");
-    res.headers.set("X-AvatarG-Path", path);
-
-    return res;
-  } catch (err: any) {
-    console.error("🔥 FILE ROUTE ERROR:", err);
     return NextResponse.json(
       {
-        ok: false,
-        error: "internal_error",
-        message: err?.message ?? String(err),
+        ok: true,
+        result: {
+          id: data.id,
+          status: data.status,
+          publicUrl: data.public_url,
+          filename: data.filename,
+          errorMessage: data.error_message,
+          updatedAt: data.updated_at,
+        },
       },
-      { status: 500 }
+      { status: 200, headers }
+    );
+  } catch (err: any) {
+    return NextResponse.json(
+      { ok: false, error: "server_error", details: err?.message ?? String(err) },
+      { status: 500, headers }
     );
   }
 }
