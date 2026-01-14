@@ -11,7 +11,7 @@ type MusicResult = {
   // ✅ preferred: same-origin proxy (/api/music/file?path=...)
   fileUrl?: string | null;
 
-  // legacy/debug fields
+  // debug fields
   publicUrl?: string | null;
   public_url?: string | null;
   url?: string | null;
@@ -48,19 +48,17 @@ async function safeJson<T = any>(res: Response): Promise<T | null> {
 }
 
 /**
- * ✅ IMPORTANT:
- * Always prefer fileUrl (same-origin proxy) to avoid CORS/redirect issues.
- * If fileUrl is missing, fallback to publicUrl (debug only).
+ * ✅ STRICT:
+ * Only use fileUrl (same-origin proxy). NO fallback.
+ * If fileUrl is missing -> show error instead of trying publicUrl.
  */
 function pickBestRemoteUrl(result?: MusicResult): string {
-  if (!result) return "";
-  return (
-    result.fileUrl ||
-    result.publicUrl ||
-    result.public_url ||
-    result.url ||
-    ""
-  );
+  if (!result?.fileUrl) return "";
+  return result.fileUrl;
+}
+
+function pickDebugPublicUrl(result?: MusicResult): string {
+  return result?.publicUrl || result?.public_url || result?.url || "";
 }
 
 function pickFilename(result?: MusicResult): string {
@@ -71,17 +69,13 @@ function pickFilename(result?: MusicResult): string {
 
 /**
  * Fetch mp3 and convert to Blob URL.
- * ✅ NOTE: For /api/music/file we are same-origin, so no CORS pain.
+ * ✅ For /api/music/file we are same-origin, so no CORS pain.
  */
-async function fetchToBlobUrl(
-  remoteUrl: string,
-  signal?: AbortSignal
-): Promise<string> {
+async function fetchToBlobUrl(remoteUrl: string, signal?: AbortSignal): Promise<string> {
   const res = await fetch(remoteUrl, {
     method: "GET",
     cache: "no-store",
     signal,
-    // Do NOT set mode/credentials. Default is best for same-origin.
   });
 
   if (!res.ok) {
@@ -106,15 +100,21 @@ export default function MusicPage() {
   const [jobId, setJobId] = useState<string>("");
   const [statusText, setStatusText] = useState<string>("");
 
-  // remoteUrl returned by backend (prefer fileUrl)
+  // ✅ fileUrl proxy for play/download
   const [remoteUrl, setRemoteUrl] = useState<string>("");
+
+  // optional debug URL (supabase public url)
+  const [debugUrl, setDebugUrl] = useState<string>("");
 
   // playableUrl is Blob URL (blob:...)
   const [playableUrl, setPlayableUrl] = useState<string>("");
 
   const [filename, setFilename] = useState<string>("");
 
-  const abortRef = useRef<AbortController | null>(null);
+  // separate controllers: one for job flow, one for audio fetching
+  const jobAbortRef = useRef<AbortController | null>(null);
+  const audioAbortRef = useRef<AbortController | null>(null);
+
   const pollingRef = useRef<number | null>(null);
 
   // track current blob url for cleanup
@@ -122,7 +122,9 @@ export default function MusicPage() {
 
   useEffect(() => {
     return () => {
-      abortRef.current?.abort();
+      jobAbortRef.current?.abort();
+      audioAbortRef.current?.abort();
+
       if (pollingRef.current) window.clearInterval(pollingRef.current);
       pollingRef.current = null;
 
@@ -165,7 +167,7 @@ export default function MusicPage() {
         model_id: "music_v1",
         force_instrumental: false,
       }),
-      signal: abortRef.current?.signal,
+      signal: jobAbortRef.current?.signal,
     });
 
     if (!res.ok) {
@@ -174,20 +176,10 @@ export default function MusicPage() {
     }
 
     const data = (await safeJson<any>(res)) || {};
-    const id =
-      data.jobId ||
-      data.id ||
-      data?.result?.jobId ||
-      data?.result?.id ||
-      "";
+    const id = data.jobId || data.id || data?.result?.jobId || data?.result?.id || "";
 
     if (!id || typeof id !== "string") {
-      throw new Error(
-        `Generate response missing jobId. Got: ${JSON.stringify(data).slice(
-          0,
-          500
-        )}`
-      );
+      throw new Error(`Generate response missing jobId. Got: ${JSON.stringify(data).slice(0, 500)}`);
     }
 
     return id;
@@ -196,7 +188,7 @@ export default function MusicPage() {
   async function fetchStatus(id: string): Promise<StatusResponse> {
     const res = await fetch(`/api/music/status?id=${encodeURIComponent(id)}`, {
       method: "GET",
-      signal: abortRef.current?.signal,
+      signal: jobAbortRef.current?.signal,
       cache: "no-store",
     });
 
@@ -204,9 +196,7 @@ export default function MusicPage() {
 
     if (!res.ok) {
       const t = await safeText(res);
-      throw new Error(
-        `Status failed: ${res.status}\n${data?.error || t || "Unknown error"}`
-      );
+      throw new Error(`Status failed: ${res.status}\n${data?.error || t || "Unknown error"}`);
     }
 
     if (!data) throw new Error("Status returned invalid JSON");
@@ -215,28 +205,29 @@ export default function MusicPage() {
 
   async function setFinalResult(result?: MusicResult) {
     const url = pickBestRemoteUrl(result);
-    if (!url) throw new Error("Job done but missing fileUrl/publicUrl");
+    if (!url) {
+      // STRICT: we do NOT fallback to publicUrl
+      throw new Error("Missing result.fileUrl. Backend must return fileUrl from /api/music/status.");
+    }
 
     setRemoteUrl(url);
+    setDebugUrl(pickDebugPublicUrl(result));
     setFilename(pickFilename(result));
 
-    // We do NOT auto-fetch blob here.
-    // Reason: user might want just Open remote first.
-    // We'll fetch blob when user clicks Prepare/Play or Download.
     cleanupBlob();
   }
 
   async function ensurePlayableBlob() {
     if (playableUrl) return playableUrl;
-    if (!remoteUrl) throw new Error("Missing remoteUrl");
+    if (!remoteUrl) throw new Error("Missing fileUrl (remoteUrl)");
 
-    // cancel any previous fetch and create new controller
-    abortRef.current?.abort();
-    abortRef.current = new AbortController();
+    // abort only previous AUDIO fetch, not the whole job flow
+    audioAbortRef.current?.abort();
+    audioAbortRef.current = new AbortController();
 
     cleanupBlob();
 
-    const blobUrl = await fetchToBlobUrl(remoteUrl, abortRef.current.signal);
+    const blobUrl = await fetchToBlobUrl(remoteUrl, audioAbortRef.current.signal);
     blobUrlRef.current = blobUrl;
     setPlayableUrl(blobUrl);
 
@@ -246,14 +237,20 @@ export default function MusicPage() {
   async function onGenerate() {
     setError("");
     setRemoteUrl("");
+    setDebugUrl("");
     setFilename("");
     setJobId("");
     setStatusText("");
     cleanupBlob();
 
-    abortRef.current?.abort();
-    abortRef.current = new AbortController();
+    // abort previous job flow + polling
+    jobAbortRef.current?.abort();
+    jobAbortRef.current = new AbortController();
     stopPolling();
+
+    // abort any audio fetch too
+    audioAbortRef.current?.abort();
+    audioAbortRef.current = null;
 
     try {
       setStep("starting");
@@ -277,9 +274,7 @@ export default function MusicPage() {
       }
 
       if (st === "error") {
-        throw new Error(
-          first.result?.errorMessage || first.error || "Music job failed"
-        );
+        throw new Error(first.result?.errorMessage || first.error || "Music job failed");
       }
 
       // Poll
@@ -313,7 +308,7 @@ export default function MusicPage() {
   }
 
   function onStop() {
-    abortRef.current?.abort();
+    jobAbortRef.current?.abort();
     stopPolling();
     setStep("idle");
     setStatusText("");
@@ -421,12 +416,7 @@ export default function MusicPage() {
             <div className="mt-5 rounded-2xl border border-white/10 bg-black/25 p-4">
               <div className="text-xs text-white/60 mb-2">Final MP3</div>
 
-              <audio
-                controls
-                className="w-full"
-                // if playableUrl exists, use it; else audio will show but user should press Prepare/Play
-                src={playableUrl || undefined}
-              />
+              <audio controls className="w-full" src={playableUrl || undefined} />
 
               <div className="mt-3 flex flex-wrap gap-3">
                 <button
@@ -443,19 +433,23 @@ export default function MusicPage() {
                   Download
                 </button>
 
-                <a
-                  href={remoteUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm hover:bg-white/10"
-                >
-                  Open remote
-                </a>
+                {/* debug: sometimes useful to open raw url */}
+                {debugUrl ? (
+                  <a
+                    href={debugUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm hover:bg-white/10"
+                  >
+                    Open debug publicUrl
+                  </a>
+                ) : null}
               </div>
 
-              <div className="mt-3 text-xs text-white/50 break-all">
-                remoteUrl: {remoteUrl}
-              </div>
+              <div className="mt-3 text-xs text-white/50 break-all">fileUrl: {remoteUrl}</div>
+              {debugUrl ? (
+                <div className="mt-1 text-xs text-white/40 break-all">publicUrl: {debugUrl}</div>
+              ) : null}
             </div>
           )}
         </div>
