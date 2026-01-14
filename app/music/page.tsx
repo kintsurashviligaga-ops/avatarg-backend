@@ -7,10 +7,15 @@ type Step = "idle" | "starting" | "waiting" | "done" | "error";
 type MusicResult = {
   id: string;
   status: "queued" | "processing" | "done" | "error" | string;
+
+  // ✅ our preferred proxy route
+  fileUrl?: string | null;
+
+  // legacy / alt fields
   publicUrl?: string | null;
   public_url?: string | null;
   url?: string | null;
-  fileUrl?: string | null;
+
   filename?: string | null;
   errorMessage?: string | null;
   updatedAt?: string | null;
@@ -42,9 +47,20 @@ async function safeJson<T = any>(res: Response): Promise<T | null> {
   }
 }
 
-function pickPublicUrl(result?: MusicResult): string {
+/**
+ * ✅ IMPORTANT:
+ * Prefer backend proxy fileUrl (/api/music/file?path=...) because it avoids CORS trouble.
+ * Fallback to public/signed urls if fileUrl isn't present.
+ */
+function pickBestRemoteUrl(result?: MusicResult): string {
   if (!result) return "";
-  return result.publicUrl || result.public_url || result.fileUrl || result.url || "";
+  return (
+    result.fileUrl ||
+    result.publicUrl ||
+    result.public_url ||
+    result.url ||
+    ""
+  );
 }
 
 function pickFilename(result?: MusicResult): string {
@@ -52,15 +68,16 @@ function pickFilename(result?: MusicResult): string {
 }
 
 /**
- * FIX: Signed/Public URLs sometimes fail in <audio> due to CORS/redirect.
- * We fetch the file, convert to Blob, then use a local object URL.
+ * Fetch remote mp3 and convert to Blob URL for <audio> and download.
+ * This avoids browser failing to play/ download from redirected/signed URLs.
  */
-async function toPlayableObjectUrl(remoteUrl: string, signal?: AbortSignal): Promise<string> {
+async function fetchToBlobUrl(remoteUrl: string, signal?: AbortSignal): Promise<{ blobUrl: string; blob: Blob }> {
   const res = await fetch(remoteUrl, {
     method: "GET",
     cache: "no-store",
     signal,
-    // credentials intentionally omitted; signed URL should work without cookies
+    redirect: "follow",
+    mode: "cors",
   });
 
   if (!res.ok) {
@@ -69,8 +86,10 @@ async function toPlayableObjectUrl(remoteUrl: string, signal?: AbortSignal): Pro
   }
 
   const blob = await res.blob();
-  const objectUrl = URL.createObjectURL(blob);
-  return objectUrl;
+  if (!blob || blob.size === 0) throw new Error("Audio fetch returned empty blob");
+
+  const blobUrl = URL.createObjectURL(blob);
+  return { blobUrl, blob };
 }
 
 export default function MusicPage() {
@@ -84,7 +103,7 @@ export default function MusicPage() {
   const [jobId, setJobId] = useState<string>("");
   const [statusText, setStatusText] = useState<string>("");
 
-  // remoteUrl is the (signed/public) URL returned by backend
+  // remoteUrl is returned by backend (prefer /api/music/file?path=...)
   const [remoteUrl, setRemoteUrl] = useState<string>("");
 
   // playableUrl is Blob URL created in browser: blob:...
@@ -104,7 +123,6 @@ export default function MusicPage() {
       if (pollingRef.current) window.clearInterval(pollingRef.current);
       pollingRef.current = null;
 
-      // cleanup blob url
       if (blobUrlRef.current) {
         URL.revokeObjectURL(blobUrlRef.current);
         blobUrlRef.current = "";
@@ -148,9 +166,7 @@ export default function MusicPage() {
     const id = data.jobId || data.id || data?.result?.jobId || data?.result?.id || "";
 
     if (!id || typeof id !== "string") {
-      throw new Error(
-        `Generate response missing jobId. Got: ${JSON.stringify(data).slice(0, 500)}`
-      );
+      throw new Error(`Generate response missing jobId. Got: ${JSON.stringify(data).slice(0, 500)}`);
     }
 
     return id;
@@ -175,22 +191,22 @@ export default function MusicPage() {
   }
 
   async function setFinalResult(result?: MusicResult) {
-    const url = pickPublicUrl(result);
-    if (!url) throw new Error("Job done but missing publicUrl");
+    const url = pickBestRemoteUrl(result);
+    if (!url) throw new Error("Job done but missing fileUrl/publicUrl");
 
-    // Save remote
+    // Save remote (for debug + Open remote)
     setRemoteUrl(url);
 
-    // Convert to playable blob url (fix Failed to fetch)
     // Cleanup previous blob url
     if (blobUrlRef.current) {
       URL.revokeObjectURL(blobUrlRef.current);
       blobUrlRef.current = "";
     }
 
-    const objUrl = await toPlayableObjectUrl(url, abortRef.current?.signal);
-    blobUrlRef.current = objUrl;
-    setPlayableUrl(objUrl);
+    // Convert to playable blob url
+    const { blobUrl } = await fetchToBlobUrl(url, abortRef.current?.signal);
+    blobUrlRef.current = blobUrl;
+    setPlayableUrl(blobUrl);
 
     setFilename(pickFilename(result));
   }
@@ -276,23 +292,20 @@ export default function MusicPage() {
     setStatusText("");
   }
 
-  async function onPlay() {
+  async function onPreparePlay() {
     setError("");
     try {
-      // If playable already exists, nothing to do
       if (playableUrl) return;
-
       if (!remoteUrl) throw new Error("Missing remoteUrl for audio");
 
-      // create playable url
       if (blobUrlRef.current) {
         URL.revokeObjectURL(blobUrlRef.current);
         blobUrlRef.current = "";
       }
 
-      const objUrl = await toPlayableObjectUrl(remoteUrl, abortRef.current?.signal);
-      blobUrlRef.current = objUrl;
-      setPlayableUrl(objUrl);
+      const { blobUrl } = await fetchToBlobUrl(remoteUrl, abortRef.current?.signal);
+      blobUrlRef.current = blobUrl;
+      setPlayableUrl(blobUrl);
     } catch (e: any) {
       setError(e?.message ?? String(e));
     }
@@ -301,18 +314,13 @@ export default function MusicPage() {
   async function onDownload() {
     setError("");
     try {
-      // Prefer playable blob; if not available, create it
-      let url = playableUrl;
-
-      if (!url) {
-        if (!remoteUrl) throw new Error("Missing remoteUrl for download");
-        url = await toPlayableObjectUrl(remoteUrl, abortRef.current?.signal);
-
-        // keep it so Play works too
-        if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
-        blobUrlRef.current = url;
-        setPlayableUrl(url);
+      // Ensure we have a blob url
+      if (!playableUrl) {
+        await onPreparePlay();
       }
+
+      const url = blobUrlRef.current || playableUrl;
+      if (!url) throw new Error("Download unavailable (missing playableUrl)");
 
       const a = document.createElement("a");
       a.href = url;
@@ -402,12 +410,11 @@ export default function MusicPage() {
             <div className="mt-5 rounded-2xl border border-white/10 bg-black/25 p-4">
               <div className="text-xs text-white/60 mb-2">Final MP3</div>
 
-              {/* FIX: use playableUrl (blob) not remote signed url */}
-              <audio controls className="w-full" src={playableUrl || undefined} />
+              <audio controls className="w-full" src={blobUrlRef.current || playableUrl || undefined} />
 
               <div className="mt-3 flex flex-wrap gap-3">
                 <button
-                  onClick={onPlay}
+                  onClick={onPreparePlay}
                   className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm hover:bg-white/10"
                 >
                   Prepare / Play
