@@ -1,23 +1,46 @@
-import { NextRequest, NextResponse } from "next/server";
-import { supabaseAdmin } from "@/lib/supabaseAdmin";
+
+kintsurashviligaga-ops
+avatarg-backend
+Repository navigation
+Code
+Issues
+Pull requests
+Actions
+Projects
+Wiki
+avatarg-backend/app/music
+/page.tsx
+kintsurashviligaga-ops
+kintsurashviligaga-ops
+Update page.tsx
+151f15f
+ · 
+1 minute ago
+120 lines (104 loc) · 3.52 KB
+
+Code
+
+Blame
+import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const revalidate = 0;
+export const maxDuration = 300; // 5 minutes for music generation
 
+/* ----------------------------- CORS ----------------------------- */
 function corsHeaders(origin?: string | null) {
-  const allowed = (process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "").trim();
-  const allowOrigin = allowed || origin || "*";
+  const allowed = (process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "*").trim();
+  const o = (origin || "").trim();
+  const allowOrigin = allowed === "*" ? (o || "*") : allowed;
+  const useCredentials = allowOrigin !== "*";
 
-  const headers: Record<string, string> = {
+  return {
     "Access-Control-Allow-Origin": allowOrigin,
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    ...(useCredentials ? { "Access-Control-Allow-Credentials": "true" } : {}),
     Vary: "Origin",
-  };
-
-  if (allowOrigin !== "*") headers["Access-Control-Allow-Credentials"] = "true";
-  return headers;
+  } as Record<string, string>;
 }
 
 export async function OPTIONS(req: Request) {
@@ -27,62 +50,93 @@ export async function OPTIONS(req: Request) {
   });
 }
 
-/**
- * POST /api/music/generate
- * ქმნის music_jobs-ში ახალ ჩანაწერს (queued)
- * აბრუნებს { ok:true, jobId }
- */
-export async function POST(req: NextRequest) {
+/* ----------------------------- POST ----------------------------- */
+export async function POST(req: Request) {
   const origin = req.headers.get("origin");
   const headers = corsHeaders(origin);
 
   try {
     const body = await req.json().catch(() => null);
-
-    const prompt = String(body?.prompt || body?.text || "").trim();
-    if (prompt.length < 6) {
+    
+    const prompt = typeof body?.prompt === "string" ? body.prompt.trim() : "";
+    if (!prompt || prompt.length < 10) {
       return NextResponse.json(
-        { ok: false, error: "prompt_too_short" },
+        { error: "Prompt must be at least 10 characters" },
         { status: 400, headers }
       );
     }
 
-    const music_length_ms = Number(body?.music_length_ms || 30000);
-    const output_format = String(body?.output_format || "mp3");
-    const model_id = String(body?.model_id || "music_v1");
-    const force_instrumental = Boolean(body?.force_instrumental || false);
+    const duration = body?.duration || 30; // 30s default
+    const style = body?.style || "cinematic";
 
-    const now = new Date().toISOString();
-
-    const { data, error } = await supabaseAdmin
-      .from("music_jobs")
-      .insert({
-        status: "queued",
-        prompt,
-        music_length_ms,
-        output_format,
-        model_id,
-        force_instrumental,
-        public_url: null,
-        filename: null,
-        error_message: null,
-        created_at: now,
-        updated_at: now,
-      })
-      .select("id")
-      .single();
-
-    if (error || !data?.id) {
+    // Get ElevenLabs API key
+    const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+    if (!ELEVENLABS_API_KEY) {
+      console.error("Missing ELEVENLABS_API_KEY");
       return NextResponse.json(
-        { ok: false, error: "db_insert_failed", details: error?.message || null },
+        { error: "Server configuration error" },
         { status: 500, headers }
       );
     }
 
-    return NextResponse.json({ ok: true, jobId: data.id }, { status: 200, headers });
-  } catch (err: any) {
+    console.log("Calling ElevenLabs Music API:", {
+      prompt: prompt.substring(0, 50) + "...",
+      duration,
+      style,
+    });
+
+    // Call ElevenLabs Music API
+    const elevenLabsResponse = await fetch(
+      "https://api.elevenlabs.io/v1/text-to-sound-effects",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "xi-api-key": ELEVENLABS_API_KEY,
+        },
+        body: JSON.stringify({
+          text: prompt,
+          duration_seconds: duration,
+          prompt_influence: 0.3,
+        }),
+      }
+    );
+
+    if (!elevenLabsResponse.ok) {
+      const errorText = await elevenLabsResponse.text();
+      console.error("ElevenLabs Music API error:", elevenLabsResponse.status, errorText);
+      return NextResponse.json(
+        { 
+          error: "Music generation failed",
+          details: `ElevenLabs API returned ${elevenLabsResponse.status}` 
+        },
+        { status: 500, headers }
+      );
+    }
+
+    // Get audio data
+    const audioBuffer = await elevenLabsResponse.arrayBuffer();
+    const audioBase64 = Buffer.from(audioBuffer).toString("base64");
+    const audioUrl = `data:audio/mpeg;base64,${audioBase64}`;
+
+    console.log("Music generated successfully, size:", audioBuffer.byteLength);
+
     return NextResponse.json(
-      { ok: false, error: "server_error", details: err?.message ?? String(err) },
+      {
+        audioUrl,
+        success: true,
+        creditsUsed: 15,
+      },
+      { status: 200, headers }
+    );
+
+  } catch (err: any) {
+    console.error("Music generation error:", err);
+    return NextResponse.json(
+      {
+        error: "Internal server error",
+        details: err?.message ?? String(err),
+      },
       { status: 500, headers }
     );
   }
