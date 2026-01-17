@@ -60,7 +60,7 @@ export async function POST(req: Request) {
     });
 
     const elevenLabsResponse = await fetch(
-      "https://api.elevenlabs.io/v1/text-to-sound-effects",
+      "https://api.elevenlabs.io/v1/sound-generation",
       {
         method: "POST",
         headers: {
