@@ -1,33 +1,9 @@
-
-kintsurashviligaga-ops
-avatarg-backend
-Repository navigation
-Code
-Issues
-Pull requests
-Actions
-Projects
-Wiki
-avatarg-backend/app/music
-/page.tsx
-kintsurashviligaga-ops
-kintsurashviligaga-ops
-Update page.tsx
-151f15f
- · 
-1 minute ago
-120 lines (104 loc) · 3.52 KB
-
-Code
-
-Blame
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 300; // 5 minutes for music generation
+export const maxDuration = 300;
 
-/* ----------------------------- CORS ----------------------------- */
 function corsHeaders(origin?: string | null) {
   const allowed = (process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "*").trim();
   const o = (origin || "").trim();
@@ -50,7 +26,6 @@ export async function OPTIONS(req: Request) {
   });
 }
 
-/* ----------------------------- POST ----------------------------- */
 export async function POST(req: Request) {
   const origin = req.headers.get("origin");
   const headers = corsHeaders(origin);
@@ -66,10 +41,9 @@ export async function POST(req: Request) {
       );
     }
 
-    const duration = body?.duration || 30; // 30s default
+    const duration = body?.duration || 30;
     const style = body?.style || "cinematic";
 
-    // Get ElevenLabs API key
     const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
     if (!ELEVENLABS_API_KEY) {
       console.error("Missing ELEVENLABS_API_KEY");
@@ -85,7 +59,6 @@ export async function POST(req: Request) {
       style,
     });
 
-    // Call ElevenLabs Music API
     const elevenLabsResponse = await fetch(
       "https://api.elevenlabs.io/v1/text-to-sound-effects",
       {
@@ -114,7 +87,6 @@ export async function POST(req: Request) {
       );
     }
 
-    // Get audio data
     const audioBuffer = await elevenLabsResponse.arrayBuffer();
     const audioBase64 = Buffer.from(audioBuffer).toString("base64");
     const audioUrl = `data:audio/mpeg;base64,${audioBase64}`;
