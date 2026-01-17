@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 function corsHeaders(origin?: string | null) {
-  const allowed = (process.env.NEXT_PUBLIC_FRONTEND_ORIGIN || "*").trim();
+  const allowed = (process.env.FRONTEND_URL || "*").trim();
   const o = (origin || "").trim();
   const allowOrigin = allowed === "*" ? (o || "*") : allowed;
   const useCredentials = allowOrigin !== "*";
