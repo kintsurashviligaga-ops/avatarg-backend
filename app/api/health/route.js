@@ -20,7 +20,9 @@ function corsHeaders(origin) {
   const isAllowed = origin && allowed.includes(origin);
 
   const headers = new Headers();
-  if (isAllowed) headers.set("Access-Control-Allow-Origin", origin!);
+  if (isAllowed && origin) {
+    headers.set("Access-Control-Allow-Origin", origin);
+  }
 
   headers.set("Vary", "Origin");
   headers.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
