@@ -1,6 +1,6 @@
 // lib/orchestrator/coordinator.ts
 // AI Pentagon Pipeline: Gemini → GPT-4o → Gemini → Grok → Pollinations
-// 100% Free Structure Stage (Gemini replaces DeepSeek)
+// Production-ready with Gemini v1 stable API support
 
 export type PipelineStage =
   | "deepseek_structure"
@@ -158,7 +158,7 @@ function loadEnvConfig(): EnvConfig {
     gemini: {
       apiKey: getEnvVar("GEMINI_API_KEY"),
       baseUrl: "https://generativelanguage.googleapis.com/v1",
-      model: "gemini-1.5-flash",
+      model: "gemini-1.5-flash-latest",
     },
     xai: {
       apiKey: getEnvVar("XAI_API_KEY"),
@@ -808,4 +808,4 @@ export async function runPentagonPipeline(input: PentagonInput): Promise<Pentago
       stageTimingsMs: timings,
     },
   };
-}
+    }
