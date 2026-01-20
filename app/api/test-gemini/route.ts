@@ -11,42 +11,37 @@ export async function GET() {
   }
 
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000);
-
-    // სწორი მოდელის სახელი: gemini-1.5-flash-latest
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`;
+    // შეცვლილი URL: gemini-1.5-flash-latest-ის ნაცვლად ვიყენებთ gemini-1.5-flash
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
 
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify({
         contents: [{
-          role: 'user',
           parts: [{
-            text: 'Say "Gemini API სრულყოფილად მუშაობს!"'
+            text: 'Say "Gemini API მუშაობს იდეალურად!"'
           }]
         }]
-      }),
-      signal: controller.signal
+      })
     });
 
-    clearTimeout(timeoutId);
-
     if (!response.ok) {
-      const errorText = await response.text();
+      const errorData = await response.json();
       return NextResponse.json({ 
         success: false, 
-        error: `API Error ${response.status}: ${errorText}` 
+        error: `API Error ${response.status}: ${JSON.stringify(errorData)}` 
       });
     }
 
     const data = await response.json();
-    const text = data.candidates[0].content.parts[0].text;
+    const content = data.candidates[0].content.parts[0].text;
 
     return NextResponse.json({ 
       success: true, 
-      response: text 
+      response: content 
     });
 
   } catch (error: any) {
