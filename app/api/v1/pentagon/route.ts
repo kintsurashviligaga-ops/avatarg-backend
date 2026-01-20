@@ -1,12 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { runPentagonPipeline } from '@/lib/orchestrator/coordinator';
 
 export async function POST(request: NextRequest) {
   try {
-    const { runPentagonPipeline } = await import('@/lib/orchestrator/coordinator');
-    
     const body = await request.json();
-    const userPrompt = body.userPrompt || '';
-    
+    const { userPrompt, constraints } = body;
+
     if (!userPrompt) {
       return NextResponse.json(
         { success: false, error: 'Missing userPrompt' },
@@ -14,67 +13,61 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const requestId = generateRequestId();
-
-    console.log('[Pentagon] Starting pipeline:', requestId);
+    const requestId = 'req_' + Date.now() + '_' + Math.random().toString(36).substring(7);
 
     const result = await runPentagonPipeline({
-      requestId: requestId,
-      userPrompt: userPrompt,
-      constraints: {
-        maxScenes: body.maxScenes || 8,
-        maxDurationSec: body.maxDurationSec || 180,
-        style: body.style,
-      },
+      requestId,
+      userPrompt,
+      constraints,
     });
-
-    console.log('[Pentagon] Pipeline completed:', requestId);
 
     return NextResponse.json({
       success: true,
       requestId: result.requestId,
-      deepseek: result.deepseek,
-      gpt: result.gpt,
-      gemini: result.gemini,
-      grok: result.grok,
-      pollinations: result.pollinations,
+      structure: result.structure,
+      edited: result.edited,
+      localized: result.localized,
+      voiceovers: result.voiceovers,
+      visualPrompts: result.visualPrompts,
+      videos: result.videos,
+      finalVideoUrl: result.finalVideoUrl,
       meta: result.meta,
     });
+
   } catch (error: any) {
-    console.error('[Pentagon] Pipeline error:', error);
-    
-    const statusCode = error.code === 'BAD_REQUEST' ? 400 : 500;
-    
+    console.error('Pentagon pipeline error:', error);
+
     return NextResponse.json(
       {
         success: false,
-        error: error.message || 'Pipeline failed',
-        code: error.code || 'UNKNOWN',
+        error: error.message || 'Pipeline execution failed',
         stage: error.stage || 'unknown',
-        retryable: error.retryable || false,
+        code: error.code || 'UNKNOWN',
       },
-      { status: statusCode }
+      { status: 500 }
     );
   }
 }
 
-export async function GET(request: NextRequest) {
+export async function GET() {
   return NextResponse.json({
-    name: 'Pentagon Pipeline API',
-    version: '1.0.0',
+    message: 'Pentagon Video Generator API',
+    version: '2.0',
     stages: [
-      'DeepSeek - Structure Generation',
-      'GPT - Editing & Refinement',
-      'Gemini - Georgian Localization',
-      'Grok - Visual Prompting',
-      'Pollinations - Image Generation',
+      'structure_generation',
+      'gpt_edit',
+      'georgian_localization',
+      'voiceover_generation',
+      'visual_prompting',
+      'video_rendering',
     ],
-    status: 'operational',
+    features: [
+      'GPT-4o-mini structure generation',
+      'Professional editing',
+      'Georgian localization',
+      'ElevenLabs voiceovers',
+      'Grok visual prompts',
+      'Pollinations video rendering',
+    ],
   });
-}
-
-function generateRequestId(): string {
-  const timestamp = Date.now();
-  const random = Math.floor(Math.random() * 1000000);
-  return 'pentagon-' + String(timestamp) + '-' + String(random);
 }
