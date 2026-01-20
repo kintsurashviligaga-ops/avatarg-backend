@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { ProductionCoordinator } from '@/lib/orchestrator/coordinator';
 
-const coordinator = new ProductionCoordinator();
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 
 export async function POST(request: NextRequest) {
   try {
+    const { ProductionCoordinator } = await import('@/lib/orchestrator/coordinator');
+    
     const body = await request.json();
     const { userId, userPrompt, brandContext } = body;
 
@@ -15,6 +17,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const coordinator = new ProductionCoordinator();
     const result = await coordinator.orchestrate({
       userId,
       userPrompt,
@@ -33,6 +36,8 @@ export async function POST(request: NextRequest) {
 
 export async function GET(request: NextRequest) {
   try {
+    const { ProductionCoordinator } = await import('@/lib/orchestrator/coordinator');
+    
     const { searchParams } = new URL(request.url);
     const jobId = searchParams.get('jobId');
 
@@ -43,7 +48,9 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    const coordinator = new ProductionCoordinator();
     const status = await coordinator.getJobStatus(jobId);
+    
     return NextResponse.json(status);
   } catch (error: any) {
     console.error('[API] Orchestrate GET error:', error);
