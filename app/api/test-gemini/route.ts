@@ -5,7 +5,7 @@ export async function GET() {
   if (!apiKey) return NextResponse.json({ success: false, error: 'GEMINI_API_KEY missing' });
 
   try {
-    // შევცვალეთ URL სტაბილური v1 ვერსიით და სწორი მოდელის სახელით
+    // ვიყენებთ v1 ვერსიას და სწორ მოდელს: gemini-1.5-flash
     const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
 
     const response = await fetch(url, {
