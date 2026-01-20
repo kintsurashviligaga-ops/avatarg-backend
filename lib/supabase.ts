@@ -1,38 +1,37 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-let adminClient: SupabaseClient | null = null;
+let clientInstance: SupabaseClient | null = null;
 
-function createAdminClient(): SupabaseClient {
-  if (adminClient) {
-    return adminClient;
+function createSupabaseClient(): SupabaseClient {
+  if (clientInstance) {
+    return clientInstance;
   }
 
-  const supabaseUrl = process.env.VITE_SUPABASE_URL;
-  const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  // Use NEXT_PUBLIC_ or fallback to VITE_ prefix
+  const supabaseUrl = 
+    process.env.NEXT_PUBLIC_SUPABASE_URL || 
+    process.env.VITE_SUPABASE_URL || 
+    process.env.SUPABASE_URL;
 
-  if (!supabaseUrl || !supabaseServiceKey) {
-    throw new Error('Missing Supabase admin environment variables: VITE_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
+  const supabaseAnonKey = 
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 
+    process.env.VITE_SUPABASE_ANON_KEY;
+
+  if (!supabaseUrl || !supabaseAnonKey) {
+    throw new Error(
+      'Missing Supabase environment variables: SUPABASE_URL or SUPABASE_ANON_KEY'
+    );
   }
 
-  adminClient = createClient(supabaseUrl, supabaseServiceKey, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false
-    }
-  });
+  clientInstance = createClient(supabaseUrl, supabaseAnonKey);
 
-  return adminClient;
+  return clientInstance;
 }
 
-// Export as getter function to avoid build-time initialization
-export const getSupabaseAdmin = (): SupabaseClient => {
-  return createAdminClient();
-};
-
-// Legacy export for backward compatibility
-export const supabaseAdmin = new Proxy({} as SupabaseClient, {
+export const supabase = new Proxy({} as SupabaseClient, {
   get: (target, prop) => {
-    const client = createAdminClient();
-    return (client as any)[prop];
+    const client = createSupabaseClient();
+    const value = (client as any)[prop];
+    return typeof value === 'function' ? value.bind(client) : value;
   }
 });
