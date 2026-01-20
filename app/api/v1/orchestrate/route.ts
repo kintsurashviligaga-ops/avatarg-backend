@@ -5,26 +5,32 @@ export const runtime = 'nodejs';
 
 export async function POST(request: NextRequest) {
   try {
+    // დინამიური იმპორტი სწორია
     const { ProductionCoordinator } = await import('@/lib/orchestrator/coordinator');
     
     const body = await request.json();
-    const { userId, userPrompt, brandContext } = body;
+    
+    // ვამატებთ შემოწმებას prompt-ზე (რასაც რეალურად აგზავნის ფორმა)
+    const userId = body.userId || 'anonymous';
+    const userPrompt = body.userPrompt || body.prompt; 
 
-    if (!userId || !userPrompt) {
+    if (!userPrompt) {
       return NextResponse.json(
-        { error: 'Missing required fields: userId and userPrompt' },
+        { error: 'პრომპტი ცარიელია. გთხოვთ შეიყვანოთ დავალება.' },
         { status: 400 }
       );
     }
 
     const coordinator = new ProductionCoordinator();
-    const result = await coordinator.orchestrate({
-      userId,
-      userPrompt,
-      brandContext: brandContext || {}
-    });
+    
+    // ვიყენებთ startVideoProduction-ს, რადგან coordinator.ts-ში ასე მივუთითეთ
+    const result = await coordinator.startVideoProduction(userPrompt, userId);
 
-    return NextResponse.json(result);
+    return NextResponse.json({
+      success: true,
+      jobId: result.id,
+      status: result.status
+    });
   } catch (error: any) {
     console.error('[API] Orchestrate POST error:', error);
     return NextResponse.json(
@@ -43,7 +49,7 @@ export async function GET(request: NextRequest) {
 
     if (!jobId) {
       return NextResponse.json(
-        { error: 'Missing jobId parameter' },
+        { error: 'Job ID არ არის მითითებული' },
         { status: 400 }
       );
     }
@@ -55,7 +61,7 @@ export async function GET(request: NextRequest) {
   } catch (error: any) {
     console.error('[API] Orchestrate GET error:', error);
     return NextResponse.json(
-      { error: error.message },
+      { error: 'Job ვერ მოიძებნა ან სისტემური შეცდომაა' },
       { status: 404 }
     );
   }
