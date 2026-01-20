@@ -121,6 +121,7 @@ interface EnvConfig {
 }
 
 function loadEnvConfig(): EnvConfig {
+function loadEnvConfig(): EnvConfig {
   const required = [
     "DEEPSEEK_API_KEY",
     "DEEPSEEK_BASE_URL",
@@ -141,11 +142,38 @@ function loadEnvConfig(): EnvConfig {
     throw new PipelineError({
       stage: "deepseek_structure",
       code: "BAD_REQUEST",
-      message: `Missing required environment variables: ${missing.join(", ")}`,
+      message: "Missing required environment variables: " + missing.join(", "),
       retryable: false,
     });
   }
 
+  return {
+    deepseek: {
+      apiKey: process.env.DEEPSEEK_API_KEY!,
+      baseUrl: process.env.DEEPSEEK_BASE_URL!,
+      model: process.env.DEEPSEEK_MODEL!,
+    },
+    gpt: {
+      apiKey: process.env.GPT_API_KEY!,
+      baseUrl: process.env.GPT_BASE_URL!,
+      model: process.env.GPT_MODEL!,
+    },
+    gemini: {
+      apiKey: process.env.GEMINI_API_KEY!,
+      baseUrl: process.env.GEMINI_BASE_URL!,
+      model: process.env.GEMINI_MODEL!,
+    },
+    grok: {
+      apiKey: process.env.GROK_API_KEY!,
+      baseUrl: process.env.GROK_BASE_URL!,
+      model: process.env.GROK_MODEL!,
+    },
+    pollinations: {
+      baseUrl: process.env.POLLINATIONS_BASE_URL || "https://image.pollinations.ai",
+    },
+    defaultTimeoutMs: parseInt(process.env.DEFAULT_TIMEOUT_MS || "20000", 10),
+  };
+}
   return {
     deepseek: {
       apiKey: process.env.DEEPSEEK_API_KEY!,
