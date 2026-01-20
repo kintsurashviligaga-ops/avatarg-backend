@@ -1,11 +1,6 @@
-import { createClient } from '@supabase/supabase-js';
+import { supabaseAdmin } from '../supabaseAdmin';
 import { v4 as uuidv4 } from 'uuid';
 import type { ProjectInput, OrchestrationResult } from '../types/orchestrator';
-
-const supabase = createClient(
-  process.env.VITE_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
 
 const FALLBACK_IMAGES = [
   'https://shotstack-assets.s3.amazonaws.com/images/realestate1.jpg',
@@ -21,8 +16,10 @@ export class ProductionCoordinator {
     const jobId = uuidv4();
 
     try {
+      console.log(`[Coordinator] Starting job ${jobId}`);
+
       // Create job record
-      const { error: jobError } = await supabase.from('jobs').insert({
+      const { error: jobError } = await supabaseAdmin.from('jobs').insert({
         id: jobId,
         user_id: input.userId,
         status: 'queued',
@@ -30,11 +27,14 @@ export class ProductionCoordinator {
         input_json: input
       });
 
-      if (jobError) throw jobError;
+      if (jobError) {
+        console.error('[Coordinator] Job creation error:', jobError);
+        throw jobError;
+      }
 
       // Start async processing (don't await)
       this.processJob(jobId, input).catch(err => {
-        console.error(`[Coordinator] Job ${jobId} failed:`, err);
+        console.error(`[Coordinator] Job ${jobId} processing failed:`, err);
       });
 
       return {
@@ -58,26 +58,31 @@ export class ProductionCoordinator {
       await this.updateJobStatus(jobId, 'running');
 
       // STEP 1: Generate script
+      console.log(`[Job ${jobId}] Step 1: Generating script`);
       await this.createJobStep(jobId, 'generate_script', 'running');
       const script = await this.generateScript(jobId, input.userPrompt);
       await this.updateJobStep(jobId, 'generate_script', 'succeeded');
 
       // STEP 2: Generate visual prompts
+      console.log(`[Job ${jobId}] Step 2: Generating visual prompts`);
       await this.createJobStep(jobId, 'generate_visuals', 'running');
       const visualPrompts = await this.generateVisualPrompts(jobId, script);
       await this.updateJobStep(jobId, 'generate_visuals', 'succeeded');
 
       // STEP 3: Get assets (fallbacks in sandbox)
+      console.log(`[Job ${jobId}] Step 3: Getting assets`);
       await this.createJobStep(jobId, 'generate_assets', 'running');
       const assets = await this.getAssets(jobId);
       await this.updateJobStep(jobId, 'generate_assets', 'succeeded');
 
       // STEP 4: Build timeline
+      console.log(`[Job ${jobId}] Step 4: Building timeline`);
       await this.createJobStep(jobId, 'build_timeline', 'running');
       const timeline = await this.buildTimeline(jobId, assets, script);
       await this.updateJobStep(jobId, 'build_timeline', 'succeeded');
 
       // STEP 5: Submit to Shotstack
+      console.log(`[Job ${jobId}] Step 5: Submitting to Shotstack`);
       await this.createJobStep(jobId, 'shotstack_render', 'running');
       const renderId = await this.submitShotstackRender(jobId, timeline);
       await this.updateJobStep(jobId, 'shotstack_render', 'succeeded');
@@ -87,14 +92,16 @@ export class ProductionCoordinator {
         timeline_json: timeline
       });
 
-      // Note: Actual render completion requires webhook or polling
-      // For sandbox, mark as completed immediately
+      console.log(`[Job ${jobId}] Submitted to Shotstack: ${renderId}`);
+
+      // Sandbox: simulate completion after 5 seconds
       setTimeout(async () => {
         await this.updateJobStatus(jobId, 'completed');
+        console.log(`[Job ${jobId}] Marked as completed (sandbox mode)`);
       }, 5000);
 
     } catch (error: any) {
-      console.error(`[ProcessJob] ${jobId} error:`, error);
+      console.error(`[Job ${jobId}] Processing error:`, error);
       await this.updateJobStatus(jobId, 'failed', null, {
         code: 'PROCESSING_ERROR',
         message: error.message
@@ -106,76 +113,102 @@ export class ProductionCoordinator {
     const deepseekKey = process.env.DEEPSEEK_API_KEY;
 
     if (!deepseekKey) {
-      const fallback = `Scene 1: ${prompt}. Duration: 5 seconds.\nScene 2: Continuation. Duration: 5 seconds.\nScene 3: Conclusion. Duration: 5 seconds.`;
-      await this.createArtifact(jobId, 'script', null, { content: fallback });
+      console.log(`[Job ${jobId}] DeepSeek key missing, using fallback script`);
+      const fallback = `Scene 1: ${prompt}. Duration: 5 seconds.\nScene 2: Continuation of the theme. Duration: 5 seconds.\nScene 3: Conclusion with impact. Duration: 5 seconds.`;
+      await this.createArtifact(jobId, 'script', null, { content: fallback, source: 'fallback' });
       return fallback;
     }
 
-    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${deepseekKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'deepseek-chat',
-        messages: [
-          {
-            role: 'system',
-            content: 'Create a 15-second video script with 3 scenes. Each scene: description + duration.'
-          },
-          { role: 'user', content: prompt }
-        ],
-        max_tokens: 500
-      })
-    });
+    try {
+      const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${deepseekKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: 'deepseek-chat',
+          messages: [
+            {
+              role: 'system',
+              content: 'You are a professional video scriptwriter. Create a concise 15-second video script with 3 scenes. Each scene should have a description and 5-second duration.'
+            },
+            { role: 'user', content: prompt }
+          ],
+          max_tokens: 500
+        })
+      });
 
-    if (!response.ok) throw new Error(`DeepSeek error: ${response.status}`);
+      if (!response.ok) {
+        throw new Error(`DeepSeek API error: ${response.status}`);
+      }
 
-    const data = await response.json();
-    const content = data.choices[0].message.content;
+      const data = await response.json();
+      const content = data.choices[0].message.content;
 
-    await this.createArtifact(jobId, 'script', null, { content, provider: 'deepseek' });
-    return content;
+      await this.createArtifact(jobId, 'script', null, { content, provider: 'deepseek' });
+      return content;
+    } catch (error: any) {
+      console.error(`[Job ${jobId}] DeepSeek error, using fallback:`, error.message);
+      const fallback = `Scene 1: ${prompt}. Duration: 5 seconds.\nScene 2: Development. Duration: 5 seconds.\nScene 3: Conclusion. Duration: 5 seconds.`;
+      await this.createArtifact(jobId, 'script', null, { content: fallback, source: 'fallback' });
+      return fallback;
+    }
   }
 
   private async generateVisualPrompts(jobId: string, script: string): Promise<string[]> {
     const geminiKey = process.env.GEMINI_API_KEY;
 
     if (!geminiKey) {
+      console.log(`[Job ${jobId}] Gemini key missing, using fallback prompts`);
       const fallback = ['Professional scene 1', 'Professional scene 2', 'Professional scene 3'];
-      await this.createArtifact(jobId, 'visual_prompt', null, { prompts: fallback });
+      await this.createArtifact(jobId, 'visual_prompt', null, { prompts: fallback, source: 'fallback' });
       return fallback;
     }
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`;
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`;
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{
-          role: 'user',
-          parts: [{
-            text: `From this script, generate 3 image prompts as JSON array: ${script}`
-          }]
-        }]
-      })
-    });
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            role: 'user',
+            parts: [{
+              text: `Based on this video script, generate exactly 3 image generation prompts as a JSON array. Each prompt should describe a key visual scene.\n\nScript:\n${script}\n\nOutput only a JSON array like: ["prompt 1", "prompt 2", "prompt 3"]`
+            }]
+          }],
+          generationConfig: {
+            maxOutputTokens: 400,
+            temperature: 0.7
+          }
+        })
+      });
 
-    if (!response.ok) throw new Error(`Gemini error: ${response.status}`);
+      if (!response.ok) {
+        throw new Error(`Gemini API error: ${response.status}`);
+      }
 
-    const data = await response.json();
-    const text = data.candidates[0].content.parts[0].text;
-    const match = text.match(/\[.*\]/s);
-    const prompts = match ? JSON.parse(match[0]) : ['Scene 1', 'Scene 2', 'Scene 3'];
+      const data = await response.json();
+      const text = data.candidates[0].content.parts[0].text;
+      const match = text.match(/\[.*\]/s);
+      const prompts = match ? JSON.parse(match[0]) : ['Scene 1', 'Scene 2', 'Scene 3'];
 
-    await this.createArtifact(jobId, 'visual_prompt', null, { prompts, provider: 'gemini' });
-    return prompts;
+      await this.createArtifact(jobId, 'visual_prompt', null, { prompts, provider: 'gemini' });
+      return prompts;
+    } catch (error: any) {
+      console.error(`[Job ${jobId}] Gemini error, using fallback:`, error.message);
+      const fallback = ['Professional scene 1', 'Professional scene 2', 'Professional scene 3'];
+      await this.createArtifact(jobId, 'visual_prompt', null, { prompts: fallback, source: 'fallback' });
+      return fallback;
+    }
   }
 
   private async getAssets(jobId: string): Promise<{ images: string[]; audio: string }> {
     // Sandbox: always use fallbacks
+    console.log(`[Job ${jobId}] Using fallback assets (sandbox mode)`);
+    
     const images = FALLBACK_IMAGES.slice(0, 3);
     const audio = FALLBACK_AUDIO;
 
@@ -196,14 +229,16 @@ export class ProductionCoordinator {
               asset: { type: 'image', src },
               start: i * 5,
               length: 5,
-              transition: { in: 'fade', out: 'fade' }
+              transition: { in: 'fade', out: 'fade' },
+              effect: i === 0 ? 'zoomIn' : i === 1 ? 'slideRight' : 'zoomOut'
             }))
           },
           {
             clips: [{
               asset: { type: 'audio', src: assets.audio },
               start: 0,
-              length: 15
+              length: 15,
+              volume: 0.5
             }]
           }
         ]
@@ -219,23 +254,32 @@ export class ProductionCoordinator {
   }
 
   private async submitShotstackRender(jobId: string, timeline: any): Promise<string> {
+    const apiKey = process.env.SHOTSTACK_API_KEY;
+
+    if (!apiKey) {
+      throw new Error('SHOTSTACK_API_KEY not configured');
+    }
+
     const response = await fetch('https://api.shotstack.io/v1/render', {
       method: 'POST',
       headers: {
-        'x-api-key': process.env.SHOTSTACK_API_KEY!,
+        'x-api-key': apiKey,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify(timeline)
     });
 
-    if (!response.ok) throw new Error(`Shotstack error: ${response.status}`);
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Shotstack error ${response.status}: ${errorText}`);
+    }
 
     const data = await response.json();
     return data.response.id;
   }
 
   private async createJobStep(jobId: string, stepName: string, status: string) {
-    await supabase.from('job_steps').insert({
+    await supabaseAdmin.from('job_steps').insert({
       job_id: jobId,
       step_name: stepName,
       status,
@@ -244,7 +288,7 @@ export class ProductionCoordinator {
   }
 
   private async updateJobStep(jobId: string, stepName: string, status: string) {
-    await supabase
+    await supabaseAdmin
       .from('job_steps')
       .update({
         status,
@@ -260,7 +304,7 @@ export class ProductionCoordinator {
     outputJson?: any,
     error?: { code: string; message: string }
   ) {
-    await supabase.from('jobs').update({
+    await supabaseAdmin.from('jobs').update({
       status,
       output_json: outputJson,
       error_code: error?.code,
@@ -271,7 +315,7 @@ export class ProductionCoordinator {
   }
 
   private async createArtifact(jobId: string, type: string, url: string | null, metadata: any) {
-    await supabase.from('artifacts').insert({
+    await supabaseAdmin.from('artifacts').insert({
       job_id: jobId,
       type,
       url,
@@ -280,15 +324,17 @@ export class ProductionCoordinator {
   }
 
   async getJobStatus(jobId: string): Promise<any> {
-    const { data: job } = await supabase
+    const { data: job, error } = await supabaseAdmin
       .from('jobs')
       .select('*')
       .eq('id', jobId)
       .single();
 
-    if (!job) throw new Error('Job not found');
+    if (error || !job) {
+      throw new Error('Job not found');
+    }
 
-    const { data: artifacts } = await supabase
+    const { data: artifacts } = await supabaseAdmin
       .from('artifacts')
       .select('*')
       .eq('job_id', jobId)
