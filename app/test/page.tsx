@@ -1,5 +1,3 @@
-'use client';
-
 import { useState, useEffect, useRef } from 'react';
 
 export default function SandboxTestUI() {
@@ -12,7 +10,6 @@ export default function SandboxTestUI() {
   const [loading, setLoading] = useState(false);
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Start orchestration
   const handleSubmit = async () => {
     if (!prompt.trim()) {
       setError('გთხოვთ შეიყვანოთ პრომპტი');
@@ -43,7 +40,6 @@ export default function SandboxTestUI() {
 
       const data = await response.json();
 
-      // FIX: Changed from data.renderJobId to data.jobId
       if (data.success && data.jobId) {
         setJobId(data.jobId);
         setStatus('queued');
@@ -58,7 +54,6 @@ export default function SandboxTestUI() {
     }
   };
 
-  // Poll job status
   const startPolling = (id: string) => {
     if (pollingRef.current) {
       clearInterval(pollingRef.current);
@@ -85,7 +80,6 @@ export default function SandboxTestUI() {
           stopPolling();
         }
 
-        // Stop polling on terminal states
         if (data.status === 'completed' || data.status === 'failed') {
           stopPolling();
         }
@@ -93,7 +87,7 @@ export default function SandboxTestUI() {
         setError(err.message);
         stopPolling();
       }
-    }, 3000); // Poll every 3 seconds
+    }, 3000);
   };
 
   const stopPolling = () => {
@@ -103,7 +97,6 @@ export default function SandboxTestUI() {
     }
   };
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => stopPolling();
   }, []);
@@ -138,7 +131,6 @@ export default function SandboxTestUI() {
       padding: '40px 20px'
     }}>
       <div style={{ maxWidth: '900px', margin: '0 auto' }}>
-        {/* Header */}
         <div style={{ marginBottom: '40px', textAlign: 'center' }}>
           <h1 style={{ 
             fontSize: '42px', 
@@ -166,7 +158,6 @@ export default function SandboxTestUI() {
           </div>
         </div>
 
-        {/* Input Section */}
         <div style={{ 
           background: '#1e293b',
           borderRadius: '16px',
@@ -220,7 +211,6 @@ export default function SandboxTestUI() {
           </button>
         </div>
 
-        {/* Status Section */}
         {jobId && (
           <div style={{ 
             background: '#1e293b',
@@ -268,7 +258,6 @@ export default function SandboxTestUI() {
                 </span>
               </div>
 
-              {/* Progress Bar */}
               <div style={{ 
                 background: '#0f172a',
                 borderRadius: '10px',
@@ -294,7 +283,6 @@ export default function SandboxTestUI() {
           </div>
         )}
 
-        {/* Error Section */}
         {error && (
           <div style={{ 
             background: '#7f1d1d',
@@ -303,7 +291,7 @@ export default function SandboxTestUI() {
             padding: '20px',
             marginBottom: '24px'
           }}>
-            <h3 style={{ marginBottom: '12px', fontSize: '18px', display: 'flex', alignItems: 'center' }}>
+            <h3 style={{ marginBottom: '12px', fontSize: '18px' }}>
               ❌ შეცდომა
             </h3>
             <pre style={{ 
@@ -319,7 +307,6 @@ export default function SandboxTestUI() {
           </div>
         )}
 
-        {/* Timeline Section */}
         {timeline && (
           <div style={{ 
             background: '#1e293b',
@@ -351,4 +338,4 @@ export default function SandboxTestUI() {
       </div>
     </div>
   );
-      }
+}
