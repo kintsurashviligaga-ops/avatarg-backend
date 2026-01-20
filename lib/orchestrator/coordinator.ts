@@ -1,5 +1,6 @@
-// coordinator.ts
-// Pentagon Pipeline: DeepSeek → GPT → Gemini → Grok → Pollinations
+// lib/orchestrator/coordinator.ts
+// Pentagon Pipeline: Production-grade AI video orchestration
+// Compatible with Next.js 14.2.5 and Vercel deployment
 
 export type PipelineStage =
   | "deepseek_structure"
@@ -118,6 +119,10 @@ interface EnvConfig {
   defaultTimeoutMs: number;
 }
 
+function getEnvVar(key: string): string {
+  return process.env[key] || "";
+}
+
 function loadEnvConfig(): EnvConfig {
   const required: string[] = [
     "DEEPSEEK_API_KEY",
@@ -135,48 +140,55 @@ function loadEnvConfig(): EnvConfig {
   ];
 
   const missing: string[] = [];
-  for (let i = 0; i < required.length; i++) {
+  for (let i = 0; i < required.length; i = i + 1) {
     const key = required[i];
-    if (!process.env[key]) {
+    if (!getEnvVar(key)) {
       missing.push(key);
     }
   }
 
   if (missing.length > 0) {
+    const errorMessage = "Missing required environment variables: " + missing.join(", ");
     throw new PipelineError({
       stage: "deepseek_structure",
       code: "BAD_REQUEST",
-      message: "Missing required environment variables: " + missing.join(", "),
+      message: errorMessage,
       retryable: false,
     });
   }
 
   return {
     deepseek: {
-      apiKey: process.env.DEEPSEEK_API_KEY || "",
-      baseUrl: process.env.DEEPSEEK_BASE_URL || "",
-      model: process.env.DEEPSEEK_MODEL || "",
+      apiKey: getEnvVar("DEEPSEEK_API_KEY"),
+      baseUrl: getEnvVar("DEEPSEEK_BASE_URL"),
+      model: getEnvVar("DEEPSEEK_MODEL"),
     },
     gpt: {
-      apiKey: process.env.GPT_API_KEY || "",
-      baseUrl: process.env.GPT_BASE_URL || "",
-      model: process.env.GPT_MODEL || "",
+      apiKey: getEnvVar("GPT_API_KEY"),
+      baseUrl: getEnvVar("GPT_BASE_URL"),
+      model: getEnvVar("GPT_MODEL"),
     },
     gemini: {
-      apiKey: process.env.GEMINI_API_KEY || "",
-      baseUrl: process.env.GEMINI_BASE_URL || "",
-      model: process.env.GEMINI_MODEL || "",
+      apiKey: getEnvVar("GEMINI_API_KEY"),
+      baseUrl: getEnvVar("GEMINI_BASE_URL"),
+      model: getEnvVar("GEMINI_MODEL"),
     },
     grok: {
-      apiKey: process.env.GROK_API_KEY || "",
-      baseUrl: process.env.GROK_BASE_URL || "",
-      model: process.env.GROK_MODEL || "",
+      apiKey: getEnvVar("GROK_API_KEY"),
+      baseUrl: getEnvVar("GROK_BASE_URL"),
+      model: getEnvVar("GROK_MODEL"),
     },
     pollinations: {
-      baseUrl: process.env.POLLINATIONS_BASE_URL || "https://image.pollinations.ai",
+      baseUrl: getEnvVar("POLLINATIONS_BASE_URL") || "https://image.pollinations.ai",
     },
-    defaultTimeoutMs: parseInt(process.env.DEFAULT_TIMEOUT_MS || "20000", 10),
+    defaultTimeoutMs: parseInt(getEnvVar("DEFAULT_TIMEOUT_MS") || "20000", 10),
   };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(function (resolve) {
+    setTimeout(resolve, ms);
+  });
 }
 
 async function fetchWithTimeout(
@@ -190,10 +202,13 @@ async function fetchWithTimeout(
   }, timeoutMs);
 
   try {
-    const response = await fetch(url, {
-      ...init,
+    const requestInit: RequestInit = {
+      method: init.method,
+      headers: init.headers,
+      body: init.body,
       signal: controller.signal,
-    });
+    };
+    const response = await fetch(url, requestInit);
     clearTimeout(timeoutId);
     return response;
   } catch (error: any) {
@@ -203,12 +218,6 @@ async function fetchWithTimeout(
     }
     throw error;
   }
-}
-
-async function sleep(ms: number): Promise<void> {
-  return new Promise(function (resolve) {
-    setTimeout(resolve, ms);
-  });
 }
 
 async function requestJson<T>(
@@ -227,15 +236,18 @@ async function requestJson<T>(
 
       if (!response.ok) {
         const statusCode = response.status;
-        const errorText = await response.text().catch(function () {
-          return "unknown";
-        });
+        let errorText = "unknown";
+        try {
+          errorText = await response.text();
+        } catch (e) {
+          errorText = "unable to read error";
+        }
 
         if (statusCode === 402) {
           throw new PipelineError({
             stage: stage,
             code: "RATE_LIMIT",
-            message: "Insufficient balance or quota exceeded: " + errorText,
+            message: "Insufficient balance: " + errorText,
             retryable: false,
           });
         }
@@ -244,7 +256,7 @@ async function requestJson<T>(
           throw new PipelineError({
             stage: stage,
             code: "BAD_REQUEST",
-            message: "Resource not found (check model name): " + errorText,
+            message: "Not found: " + errorText,
             retryable: false,
           });
         }
@@ -253,7 +265,7 @@ async function requestJson<T>(
           throw new PipelineError({
             stage: stage,
             code: "RATE_LIMIT",
-            message: "Rate limit exceeded: " + errorText,
+            message: "Rate limit: " + errorText,
             retryable: true,
           });
         }
@@ -262,7 +274,7 @@ async function requestJson<T>(
           throw new PipelineError({
             stage: stage,
             code: "PROVIDER_UNAVAILABLE",
-            message: "Provider error " + String(statusCode) + ": " + errorText,
+            message: "Server error " + String(statusCode),
             retryable: true,
           });
         }
@@ -270,7 +282,7 @@ async function requestJson<T>(
         throw new PipelineError({
           stage: stage,
           code: "UPSTREAM_ERROR",
-          message: "HTTP " + String(statusCode) + ": " + errorText,
+          message: "HTTP " + String(statusCode),
           retryable: false,
         });
       }
@@ -279,7 +291,9 @@ async function requestJson<T>(
       return json as T;
     } catch (error: any) {
       if (error instanceof PipelineError) {
-        if (!error.retryable) throw error;
+        if (!error.retryable) {
+          throw error;
+        }
         lastError = error;
       } else if (error.message === "TIMEOUT") {
         lastError = new PipelineError({
@@ -299,7 +313,7 @@ async function requestJson<T>(
         });
       }
 
-      attempt++;
+      attempt = attempt + 1;
       if (attempt < maxRetries) {
         const backoffMs = 400 * Math.pow(3, attempt - 1);
         await sleep(backoffMs);
@@ -307,23 +321,21 @@ async function requestJson<T>(
     }
   }
 
-  throw (
-    lastError ||
-    new PipelineError({
-      stage: stage,
-      code: "UNKNOWN",
-      message: "Max retries exceeded",
-      retryable: false,
-    })
-  );
+  throw lastError || new PipelineError({
+    stage: stage,
+    code: "UNKNOWN",
+    message: "Max retries exceeded",
+    retryable: false,
+  });
 }
 
 function cleanJsonString(text: string): string {
-  return text
-    .replace(/```json\n?/g, "")
-    .replace(/```\n?/g, "")
-    .replace(/^[\s\n]+/, "")
-    .replace(/[\s\n]+$/, "");
+  let cleaned = text;
+  cleaned = cleaned.replace(/```json\n?/g, "");
+  cleaned = cleaned.replace(/```\n?/g, "");
+  cleaned = cleaned.replace(/^[\s\n]+/, "");
+  cleaned = cleaned.replace(/[\s\n]+$/, "");
+  return cleaned;
 }
 
 async function stageDeepSeek(
@@ -333,35 +345,43 @@ async function stageDeepSeek(
   const maxScenes = input.constraints?.maxScenes || 8;
   const maxDuration = input.constraints?.maxDurationSec || 180;
 
-  const systemPrompt =
-    "You are a video structure architect. Return ONLY valid JSON matching this schema:\n" +
-    "{\n" +
-    '  "title": "string",\n' +
-    '  "logline": "string",\n' +
-    '  "scenes": [\n' +
-    "    {\n" +
-    '      "id": "scene_1",\n' +
-    '      "beat": "string",\n' +
-    '      "durationSec": number,\n' +
-    '      "camera": "string",\n' +
-    '      "setting": "string",\n' +
-    '      "characters": ["string"],\n' +
-    '      "action": "string"\n' +
-    "    }\n" +
-    "  ]\n" +
-    "}\n\n" +
-    "Constraints:\n" +
-    "- Maximum " +
-    String(maxScenes) +
-    " scenes\n" +
-    "- Total duration <= " +
-    String(maxDuration) +
-    " seconds\n" +
-    "- Each scene must have unique ID starting with scene_\n" +
-    "- Do not include markdown fences or any text outside JSON\n" +
-    "- If you cannot comply, return a JSON error object\n\n" +
-    "User prompt: " +
-    input.userPrompt;
+  const lines: string[] = [];
+  lines.push("You are a video structure architect. Return ONLY valid JSON matching this schema:");
+  lines.push("{");
+  lines.push('  "title": "string",');
+  lines.push('  "logline": "string",');
+  lines.push('  "scenes": [');
+  lines.push("    {");
+  lines.push('      "id": "scene_1",');
+  lines.push('      "beat": "string",');
+  lines.push('      "durationSec": number,');
+  lines.push('      "camera": "string",');
+  lines.push('      "setting": "string",');
+  lines.push('      "characters": ["string"],');
+  lines.push('      "action": "string"');
+  lines.push("    }");
+  lines.push("  ]");
+  lines.push("}");
+  lines.push("");
+  lines.push("Constraints:");
+  lines.push("- Maximum " + String(maxScenes) + " scenes");
+  lines.push("- Total duration <= " + String(maxDuration) + " seconds");
+  lines.push("- Each scene must have unique ID starting with scene_");
+  lines.push("- Do not include markdown fences");
+  lines.push("");
+  lines.push("User prompt: " + input.userPrompt);
+
+  const systemPrompt = lines.join("\n");
+
+  const requestBody = {
+    model: config.deepseek.model,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: input.userPrompt },
+    ],
+    temperature: 0.7,
+    max_tokens: 2000,
+  };
 
   const response = await requestJson<any>(
     "deepseek_structure",
@@ -370,24 +390,16 @@ async function stageDeepSeek(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: "Bearer " + config.deepseek.apiKey,
+        "Authorization": "Bearer " + config.deepseek.apiKey,
       },
-      body: JSON.stringify({
-        model: config.deepseek.model,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: input.userPrompt },
-        ],
-        temperature: 0.7,
-        max_tokens: 2000,
-      }),
+      body: JSON.stringify(requestBody),
     },
     config.defaultTimeoutMs,
     2
   );
 
   let content: string;
-  if (response.choices && response.choices[0]?.message?.content) {
+  if (response.choices && response.choices[0] && response.choices[0].message && response.choices[0].message.content) {
     content = response.choices[0].message.content;
   } else {
     throw new PipelineError({
@@ -412,11 +424,7 @@ async function stageDeepSeek(
     });
   }
 
-  if (
-    !structure.title ||
-    !structure.logline ||
-    !Array.isArray(structure.scenes)
-  ) {
+  if (!structure.title || !structure.logline || !Array.isArray(structure.scenes)) {
     throw new PipelineError({
       stage: "deepseek_structure",
       code: "INVALID_JSON",
@@ -436,27 +444,35 @@ async function stageGPT(
   const maxScenes = input.constraints?.maxScenes || 8;
   const maxDuration = input.constraints?.maxDurationSec || 180;
 
-  const systemPrompt =
-    "You are a video editor. Refine this structure. Return ONLY valid JSON matching this schema:\n" +
-    "{\n" +
-    '  "title": "string",\n' +
-    '  "logline": "string",\n' +
-    '  "scenes": [...same as input...],\n' +
-    '  "globalNotes": ["string"]\n' +
-    "}\n\n" +
-    "Rules:\n" +
-    "- Enforce maximum " +
-    String(maxScenes) +
-    " scenes (truncate if needed)\n" +
-    "- Enforce total duration <= " +
-    String(maxDuration) +
-    " seconds (scale if needed)\n" +
-    "- Tighten beats, improve pacing\n" +
-    "- Add editing notes to globalNotes array\n" +
-    "- Do not include markdown fences or any text outside JSON\n" +
-    "- Preserve scene IDs\n\n" +
-    "Input structure:\n" +
-    JSON.stringify(structure);
+  const lines: string[] = [];
+  lines.push("You are a video editor. Refine this structure. Return ONLY valid JSON:");
+  lines.push("{");
+  lines.push('  "title": "string",');
+  lines.push('  "logline": "string",');
+  lines.push('  "scenes": [...],');
+  lines.push('  "globalNotes": ["string"]');
+  lines.push("}");
+  lines.push("");
+  lines.push("Rules:");
+  lines.push("- Maximum " + String(maxScenes) + " scenes");
+  lines.push("- Total duration <= " + String(maxDuration) + " seconds");
+  lines.push("- Preserve scene IDs");
+  lines.push("- Do not include markdown fences");
+  lines.push("");
+  lines.push("Input:");
+  lines.push(JSON.stringify(structure));
+
+  const systemPrompt = lines.join("\n");
+
+  const requestBody = {
+    model: config.gpt.model,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: JSON.stringify(structure) },
+    ],
+    temperature: 0.5,
+    max_tokens: 3000,
+  };
 
   const response = await requestJson<any>(
     "gpt_edit",
@@ -465,24 +481,16 @@ async function stageGPT(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: "Bearer " + config.gpt.apiKey,
+        "Authorization": "Bearer " + config.gpt.apiKey,
       },
-      body: JSON.stringify({
-        model: config.gpt.model,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: JSON.stringify(structure) },
-        ],
-        temperature: 0.5,
-        max_tokens: 3000,
-      }),
+      body: JSON.stringify(requestBody),
     },
     config.defaultTimeoutMs,
     2
   );
 
   let content: string;
-  if (response.choices && response.choices[0]?.message?.content) {
+  if (response.choices && response.choices[0] && response.choices[0].message && response.choices[0].message.content) {
     content = response.choices[0].message.content;
   } else {
     throw new PipelineError({
@@ -508,31 +516,39 @@ async function stageGPT(
   }
 
   if (edited.scenes.length > maxScenes) {
-    edited.scenes = edited.scenes.slice(0, maxScenes);
+    const truncated = [];
+    for (let i = 0; i < maxScenes; i = i + 1) {
+      truncated.push(edited.scenes[i]);
+    }
+    edited.scenes = truncated;
     edited.globalNotes = edited.globalNotes || [];
     edited.globalNotes.push("Truncated to " + String(maxScenes) + " scenes");
   }
 
   let totalDuration = 0;
-  for (let i = 0; i < edited.scenes.length; i++) {
-    totalDuration += edited.scenes[i].durationSec;
+  for (let i = 0; i < edited.scenes.length; i = i + 1) {
+    totalDuration = totalDuration + edited.scenes[i].durationSec;
   }
 
   if (totalDuration > maxDuration) {
     const scale = maxDuration / totalDuration;
     const scaledScenes = [];
-    for (let i = 0; i < edited.scenes.length; i++) {
-      const s = edited.scenes[i];
-      scaledScenes.push({
-        ...s,
-        durationSec: Math.floor(s.durationSec * scale),
-      });
+    for (let i = 0; i < edited.scenes.length; i = i + 1) {
+      const scene = edited.scenes[i];
+      const scaledScene = {
+        id: scene.id,
+        beat: scene.beat,
+        durationSec: Math.floor(scene.durationSec * scale),
+        camera: scene.camera,
+        setting: scene.setting,
+        characters: scene.characters,
+        action: scene.action,
+      };
+      scaledScenes.push(scaledScene);
     }
     edited.scenes = scaledScenes;
     edited.globalNotes = edited.globalNotes || [];
-    edited.globalNotes.push(
-      "Scaled durations to fit " + String(maxDuration) + "s total"
-    );
+    edited.globalNotes.push("Scaled to " + String(maxDuration) + "s");
   }
 
   return edited;
@@ -542,36 +558,38 @@ async function stageGemini(
   edited: EditedStructure,
   config: EnvConfig
 ): Promise<LocalizedStructureKA> {
-  const systemPrompt =
-    "You are a Georgian localization expert. Translate this video structure to fluent, culturally correct Georgian. Return ONLY valid JSON matching this schema:\n" +
-    "{\n" +
-    '  "title_ka": "string",\n' +
-    '  "logline_ka": "string",\n' +
-    '  "scenes_ka": [\n' +
-    "    {\n" +
-    '      "id": "string (preserve original)",\n' +
-    '      "beat_ka": "string",\n' +
-    '      "camera_ka": "string",\n' +
-    '      "setting_ka": "string",\n' +
-    '      "characters_ka": ["string"],\n' +
-    '      "action_ka": "string"\n' +
-    "    }\n" +
-    "  ]\n" +
-    "}\n\n" +
-    "Rules:\n" +
-    "- Preserve scene IDs exactly as provided\n" +
-    "- Use native Georgian script, no transliteration\n" +
-    "- Ensure cultural appropriateness\n" +
-    "- Do not include markdown fences or any text outside JSON\n\n" +
-    "Input structure:\n" +
-    JSON.stringify(edited);
+  const lines: string[] = [];
+  lines.push("Georgian localization expert. Return ONLY valid JSON:");
+  lines.push("{");
+  lines.push('  "title_ka": "string",');
+  lines.push('  "logline_ka": "string",');
+  lines.push('  "scenes_ka": [...]');
+  lines.push("}");
+  lines.push("");
+  lines.push("Rules:");
+  lines.push("- Preserve scene IDs");
+  lines.push("- Native Georgian script only");
+  lines.push("- Do not include markdown fences");
+  lines.push("");
+  lines.push("Input:");
+  lines.push(JSON.stringify(edited));
 
-  const url =
-    config.gemini.baseUrl +
-    "/models/" +
-    config.gemini.model +
-    ":generateContent?key=" +
-    config.gemini.apiKey;
+  const systemPrompt = lines.join("\n");
+
+  const url = config.gemini.baseUrl + "/models/" + config.gemini.model + ":generateContent?key=" + config.gemini.apiKey;
+
+  const requestBody = {
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: systemPrompt }],
+      },
+    ],
+    generationConfig: {
+      temperature: 0.3,
+      maxOutputTokens: 4000,
+    },
+  };
 
   const response = await requestJson<any>(
     "gemini_localize_ka",
@@ -579,18 +597,7 @@ async function stageGemini(
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: systemPrompt }],
-          },
-        ],
-        generationConfig: {
-          temperature: 0.3,
-          maxOutputTokens: 4000,
-        },
-      }),
+      body: JSON.stringify(requestBody),
     },
     config.defaultTimeoutMs,
     2
@@ -599,7 +606,11 @@ async function stageGemini(
   let content: string;
   if (
     response.candidates &&
-    response.candidates[0]?.content?.parts?.[0]?.text
+    response.candidates[0] &&
+    response.candidates[0].content &&
+    response.candidates[0].content.parts &&
+    response.candidates[0].content.parts[0] &&
+    response.candidates[0].content.parts[0].text
   ) {
     content = response.candidates[0].content.parts[0].text;
   } else {
@@ -625,15 +636,11 @@ async function stageGemini(
     });
   }
 
-  if (
-    !localized.title_ka ||
-    !localized.logline_ka ||
-    !Array.isArray(localized.scenes_ka)
-  ) {
+  if (!localized.title_ka || !localized.logline_ka || !Array.isArray(localized.scenes_ka)) {
     throw new PipelineError({
       stage: "gemini_localize_ka",
       code: "INVALID_JSON",
-      message: "Gemini localized structure missing required fields",
+      message: "Gemini missing required fields",
       retryable: false,
     });
   }
@@ -646,32 +653,37 @@ async function stageGrok(
   input: PentagonInput,
   config: EnvConfig
 ): Promise<GrokPromptPack> {
-  const styleHint =
-    input.constraints?.style || "cinematic, high-quality, professional";
+  const styleHint = input.constraints?.style || "cinematic, professional";
 
-  const systemPrompt =
-    "You are a visual prompt engineer. Convert these scenes into optimized visual prompts for Pollinations AI video generation. Return ONLY valid JSON matching this schema:\n" +
-    "{\n" +
-    '  "shots": [\n' +
-    "    {\n" +
-    '      "sceneId": "string (match input scene id)",\n' +
-    '      "prompt": "string (detailed visual prompt)",\n' +
-    '      "negative": "string (optional)",\n' +
-    '      "camera": "string (optional)",\n' +
-    '      "lighting": "string (optional)",\n' +
-    '      "styleTags": ["string"] (optional)\n' +
-    "    }\n" +
-    "  ]\n" +
-    "}\n\n" +
-    "Rules:\n" +
-    "- Each shot must match a scene ID from input\n" +
-    "- Prompts must be optimized for AI video generation (detailed, visual, no dialogue)\n" +
-    "- Include camera angles, lighting, mood, style: " +
-    styleHint +
-    "\n" +
-    "- Do not include markdown fences or any text outside JSON\n\n" +
-    "Input scenes:\n" +
-    JSON.stringify(edited.scenes);
+  const lines: string[] = [];
+  lines.push("Visual prompt engineer. Return ONLY valid JSON:");
+  lines.push("{");
+  lines.push('  "shots": [');
+  lines.push("    {");
+  lines.push('      "sceneId": "string",');
+  lines.push('      "prompt": "string"');
+  lines.push("    }");
+  lines.push("  ]");
+  lines.push("}");
+  lines.push("");
+  lines.push("Style: " + styleHint);
+  lines.push("Do not include markdown fences");
+  lines.push("");
+  lines.push("Scenes:");
+  lines.push(JSON.stringify(edited.scenes));
+
+  const systemPrompt = lines.join("\n");
+
+  const requestBody = {
+    model: config.grok.model,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: JSON.stringify(edited.scenes) },
+    ],
+    temperature: 0.8,
+    max_tokens: 3000,
+    response_format: { type: "json_object" },
+  };
 
   const response = await requestJson<any>(
     "grok_visual_prompting",
@@ -680,25 +692,16 @@ async function stageGrok(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: "Bearer " + config.grok.apiKey,
+        "Authorization": "Bearer " + config.grok.apiKey,
       },
-      body: JSON.stringify({
-        model: config.grok.model,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: JSON.stringify(edited.scenes) },
-        ],
-        temperature: 0.8,
-        max_tokens: 3000,
-        response_format: { type: "json_object" },
-      }),
+      body: JSON.stringify(requestBody),
     },
     config.defaultTimeoutMs,
     2
   );
 
   let content: string;
-  if (response.choices && response.choices[0]?.message?.content) {
+  if (response.choices && response.choices[0] && response.choices[0].message && response.choices[0].message.content) {
     content = response.choices[0].message.content;
   } else {
     throw new PipelineError({
@@ -727,18 +730,18 @@ async function stageGrok(
     throw new PipelineError({
       stage: "grok_visual_prompting",
       code: "INVALID_JSON",
-      message: "Grok prompts missing shots array",
+      message: "Grok missing shots array",
       retryable: false,
     });
   }
 
-  for (let i = 0; i < prompts.shots.length; i++) {
+  for (let i = 0; i < prompts.shots.length; i = i + 1) {
     const shot = prompts.shots[i];
     if (!shot.sceneId || !shot.prompt) {
       throw new PipelineError({
         stage: "grok_visual_prompting",
         code: "INVALID_JSON",
-        message: "Grok shot missing sceneId or prompt",
+        message: "Grok shot missing fields",
         retryable: false,
       });
     }
@@ -747,13 +750,10 @@ async function stageGrok(
   return prompts;
 }
 
-function generateDeterministicSeed(
-  requestId: string,
-  sceneId: string
-): number {
+function generateDeterministicSeed(requestId: string, sceneId: string): number {
   let hash = 0;
   const combined = requestId + ":" + sceneId;
-  for (let i = 0; i < combined.length; i++) {
+  for (let i = 0; i < combined.length; i = i + 1) {
     const char = combined.charCodeAt(i);
     hash = (hash << 5) - hash + char;
     hash = hash & hash;
@@ -768,18 +768,20 @@ async function stagePollinations(
 ): Promise<PollinationsRender[]> {
   const renders: PollinationsRender[] = [];
 
-  for (let i = 0; i < prompts.shots.length; i++) {
+  for (let i = 0; i < prompts.shots.length; i = i + 1) {
     const shot = prompts.shots[i];
     const seed = generateDeterministicSeed(input.requestId, shot.sceneId);
     const encodedPrompt = encodeURIComponent(shot.prompt);
 
-    const url =
-      config.pollinations.baseUrl +
-      "/prompt/" +
-      encodedPrompt +
-      "?width=1080&height=1920&seed=" +
-      String(seed) +
-      "&nologo=true&enhance=true";
+    const urlParts: string[] = [];
+    urlParts.push(config.pollinations.baseUrl);
+    urlParts.push("/prompt/");
+    urlParts.push(encodedPrompt);
+    urlParts.push("?width=1080&height=1920&seed=");
+    urlParts.push(String(seed));
+    urlParts.push("&nologo=true&enhance=true");
+
+    const url = urlParts.join("");
 
     renders.push({
       sceneId: shot.sceneId,
@@ -790,9 +792,7 @@ async function stagePollinations(
   return renders;
 }
 
-export async function runPentagonPipeline(
-  input: PentagonInput
-): Promise<PentagonOutput> {
+export async function runPentagonPipeline(input: PentagonInput): Promise<PentagonOutput> {
   const startedAt = new Date().toISOString();
   const timings: Partial<Record<PipelineStage, number>> = {};
 
@@ -844,4 +844,4 @@ export async function runPentagonPipeline(
       stageTimingsMs: timings,
     },
   };
-          }
+        }
