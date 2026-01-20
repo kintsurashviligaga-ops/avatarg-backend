@@ -1,13 +1,14 @@
 // lib/orchestrator/coordinator.ts
-// AI Pentagon Pipeline: GPT-4o → GPT-4o → GPT-4o → Grok → Pollinations
-// Production-ready with OpenAI only (NO Gemini dependencies)
+// AI Pentagon Pipeline: GPT-4o → GPT-4o → GPT-4o → ElevenLabs → Grok → Pollinations
+// Production-ready with Georgian voiceover support via ElevenLabs
 
 export type PipelineStage =
-  | "deepseek_structure"
+  | "structure_generation"
   | "gpt_edit"
-  | "gemini_localize_ka"
-  | "grok_visual_prompting"
-  | "pollinations_render";
+  | "georgian_localization"
+  | "voiceover_generation"
+  | "visual_prompting"
+  | "video_rendering";
 
 export interface PentagonInput {
   requestId: string;
@@ -19,7 +20,7 @@ export interface PentagonInput {
   };
 }
 
-export interface DeepSeekStructure {
+export interface VideoStructure {
   title: string;
   logline: string;
   scenes: Array<{
@@ -33,7 +34,7 @@ export interface DeepSeekStructure {
   }>;
 }
 
-export interface EditedStructure extends DeepSeekStructure {
+export interface EditedStructure extends VideoStructure {
   globalNotes: string[];
 }
 
@@ -47,10 +48,19 @@ export interface LocalizedStructureKA {
     setting_ka: string;
     characters_ka: string[];
     action_ka: string;
+    narration_ka: string;
   }>;
 }
 
-export interface GrokPromptPack {
+export interface VoiceoverPack {
+  voiceovers: Array<{
+    sceneId: string;
+    text: string;
+    audioUrl: string;
+  }>;
+}
+
+export interface VisualPromptPack {
   shots: Array<{
     sceneId: string;
     prompt: string;
@@ -61,7 +71,7 @@ export interface GrokPromptPack {
   }>;
 }
 
-export interface PollinationsRender {
+export interface VideoRender {
   sceneId: string;
   imageUrl: string;
   videoUrl: string;
@@ -69,11 +79,12 @@ export interface PollinationsRender {
 
 export interface PentagonOutput {
   requestId: string;
-  deepseek: DeepSeekStructure;
-  gpt: EditedStructure;
-  gemini: LocalizedStructureKA;
-  grok: GrokPromptPack;
-  pollinations: PollinationsRender[];
+  structure: VideoStructure;
+  edited: EditedStructure;
+  localized: LocalizedStructureKA;
+  voiceovers: VoiceoverPack;
+  visualPrompts: VisualPromptPack;
+  videos: VideoRender[];
   finalVideoUrl: string;
   meta: {
     startedAt: string;
@@ -114,6 +125,7 @@ export class PipelineError extends Error {
 
 interface EnvConfig {
   openai: { apiKey: string; baseUrl: string; model: string };
+  elevenlabs: { apiKey: string; baseUrl: string; voiceId: string };
   xai: { apiKey: string; baseUrl: string; model: string };
   pollinations: { baseUrl: string; videoBaseUrl: string };
   defaultTimeoutMs: number;
@@ -126,6 +138,7 @@ function getEnvVar(key: string): string {
 function loadEnvConfig(): EnvConfig {
   const required: string[] = [
     "OPENAI_API_KEY",
+    "ELEVENLABS_API_KEY",
     "XAI_API_KEY",
   ];
 
@@ -140,7 +153,7 @@ function loadEnvConfig(): EnvConfig {
   if (missing.length > 0) {
     const errorMessage = "Missing required environment variables: " + missing.join(", ");
     throw new PipelineError({
-      stage: "deepseek_structure",
+      stage: "structure_generation",
       code: "BAD_REQUEST",
       message: errorMessage,
       retryable: false,
@@ -152,6 +165,11 @@ function loadEnvConfig(): EnvConfig {
       apiKey: getEnvVar("OPENAI_API_KEY"),
       baseUrl: "https://api.openai.com/v1",
       model: "gpt-4o-mini",
+    },
+    elevenlabs: {
+      apiKey: getEnvVar("ELEVENLABS_API_KEY"),
+      baseUrl: "https://api.elevenlabs.io/v1",
+      voiceId: getEnvVar("ELEVENLABS_VOICE_ID") || "pNInz6obpgDQGcFmaJgB", // Default Georgian female voice
     },
     xai: {
       apiKey: getEnvVar("XAI_API_KEY"),
@@ -319,10 +337,10 @@ function cleanJsonString(text: string): string {
   return cleaned;
 }
 
-async function stageDeepSeek(
+async function stageStructure(
   input: PentagonInput,
   config: EnvConfig
-): Promise<DeepSeekStructure> {
+): Promise<VideoStructure> {
   const maxScenes = input.constraints?.maxScenes || 6;
   const maxDuration = input.constraints?.maxDurationSec || 120;
 
@@ -367,7 +385,7 @@ async function stageDeepSeek(
   };
 
   const response = await requestJson<any>(
-    "deepseek_structure",
+    "structure_generation",
     config.openai.baseUrl + "/chat/completions",
     {
       method: "POST",
@@ -388,20 +406,20 @@ async function stageDeepSeek(
 
   if (!content) {
     throw new PipelineError({
-      stage: "deepseek_structure",
+      stage: "structure_generation",
       code: "INVALID_JSON",
       message: "Structure response missing",
       retryable: false,
     });
   }
 
-  let structure: DeepSeekStructure;
+  let structure: VideoStructure;
   try {
     const cleaned = cleanJsonString(content);
     structure = JSON.parse(cleaned);
   } catch (error) {
     throw new PipelineError({
-      stage: "deepseek_structure",
+      stage: "structure_generation",
       code: "INVALID_JSON",
       message: "Failed to parse structure JSON",
       retryable: false,
@@ -411,7 +429,7 @@ async function stageDeepSeek(
 
   if (!structure.title || !structure.logline || !Array.isArray(structure.scenes)) {
     throw new PipelineError({
-      stage: "deepseek_structure",
+      stage: "structure_generation",
       code: "INVALID_JSON",
       message: "Invalid structure: missing required fields",
       retryable: false,
@@ -421,8 +439,8 @@ async function stageDeepSeek(
   return structure;
 }
 
-async function stageGPT(
-  structure: DeepSeekStructure,
+async function stageEdit(
+  structure: VideoStructure,
   input: PentagonInput,
   config: EnvConfig
 ): Promise<EditedStructure> {
@@ -527,38 +545,37 @@ async function stageGPT(
   return edited;
 }
 
-async function stageGemini(
+async function stageLocalize(
   edited: EditedStructure,
   config: EnvConfig
 ): Promise<LocalizedStructureKA> {
   const lines: string[] = [];
-  lines.push("You are a Georgian localization expert. Translate this video structure to fluent Georgian.");
-  lines.push("Return ONLY valid JSON with all fields ending in _ka (e.g., title_ka, beat_ka).");
+  lines.push("Translate this video structure to Georgian. For each scene, also create a short voiceover narration script (2-3 sentences).");
+  lines.push("Return JSON with all field names ending in _ka, PLUS narration_ka for voiceover text.");
   lines.push("");
-  lines.push("RULES:");
-  lines.push("- Preserve all scene IDs exactly (id field stays in English)");
-  lines.push("- Use native Georgian script only, no transliteration");
-  lines.push("- Ensure cultural appropriateness");
-  lines.push("- Do NOT include markdown code fences");
+  lines.push("Use native Georgian script (ქართული დამწერლობა).");
   lines.push("");
   lines.push("Input structure:");
-  lines.push(JSON.stringify(edited));
+  lines.push(JSON.stringify(edited, null, 2));
 
   const systemPrompt = lines.join("\n");
 
   const requestBody = {
     model: config.openai.model,
     messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: JSON.stringify(edited) },
+      { 
+        role: "system", 
+        content: "You are a Georgian translator. Translate JSON to Georgian, add _ka suffix to field names, and create narration_ka text for voiceovers." 
+      },
+      { role: "user", content: systemPrompt },
     ],
-    temperature: 0.3,
+    temperature: 0.2,
     max_tokens: 4000,
     response_format: { type: "json_object" },
   };
 
   const response = await requestJson<any>(
-    "gemini_localize_ka",
+    "georgian_localization",
     config.openai.baseUrl + "/chat/completions",
     {
       method: "POST",
@@ -569,7 +586,7 @@ async function stageGemini(
       body: JSON.stringify(requestBody),
     },
     config.defaultTimeoutMs,
-    2
+    3
   );
 
   let content = "";
@@ -579,32 +596,60 @@ async function stageGemini(
 
   if (!content) {
     throw new PipelineError({
-      stage: "gemini_localize_ka",
+      stage: "georgian_localization",
       code: "INVALID_JSON",
       message: "Localization response missing",
       retryable: false,
     });
   }
 
-  let localized: LocalizedStructureKA;
+  let parsed: any;
   try {
     const cleaned = cleanJsonString(content);
-    localized = JSON.parse(cleaned);
+    parsed = JSON.parse(cleaned);
   } catch (error) {
     throw new PipelineError({
-      stage: "gemini_localize_ka",
+      stage: "georgian_localization",
       code: "INVALID_JSON",
-      message: "Failed to parse localization JSON",
+      message: "Failed to parse JSON: " + String(error),
       retryable: false,
       cause: error,
     });
   }
 
-  if (!localized.title_ka || !localized.logline_ka || !Array.isArray(localized.scenes_ka)) {
+  const localized: LocalizedStructureKA = {
+    title_ka: parsed.title_ka || parsed.title || "უსათაურო",
+    logline_ka: parsed.logline_ka || parsed.logline || "",
+    scenes_ka: [],
+  };
+
+  if (Array.isArray(parsed.scenes_ka)) {
+    localized.scenes_ka = parsed.scenes_ka.map((scene: any) => ({
+      id: scene.id,
+      beat_ka: scene.beat_ka || scene.beat || "",
+      camera_ka: scene.camera_ka || scene.camera || "",
+      setting_ka: scene.setting_ka || scene.setting || "",
+      characters_ka: scene.characters_ka || scene.characters || [],
+      action_ka: scene.action_ka || scene.action || "",
+      narration_ka: scene.narration_ka || scene.action_ka || scene.beat_ka || "",
+    }));
+  } else if (Array.isArray(parsed.scenes)) {
+    localized.scenes_ka = parsed.scenes.map((scene: any) => ({
+      id: scene.id,
+      beat_ka: scene.beat_ka || scene.beat || "",
+      camera_ka: scene.camera_ka || scene.camera || "",
+      setting_ka: scene.setting_ka || scene.setting || "",
+      characters_ka: scene.characters_ka || scene.characters || [],
+      action_ka: scene.action_ka || scene.action || "",
+      narration_ka: scene.narration_ka || scene.action_ka || scene.beat_ka || "",
+    }));
+  }
+
+  if (!localized.title_ka || !localized.scenes_ka || localized.scenes_ka.length === 0) {
     throw new PipelineError({
-      stage: "gemini_localize_ka",
+      stage: "georgian_localization",
       code: "INVALID_JSON",
-      message: "Invalid localization: missing required fields",
+      message: "Could not build valid localization",
       retryable: false,
     });
   }
@@ -612,11 +657,76 @@ async function stageGemini(
   return localized;
 }
 
-async function stageGrok(
+async function stageVoiceover(
+  localized: LocalizedStructureKA,
+  config: EnvConfig
+): Promise<VoiceoverPack> {
+  const voiceovers: Array<{ sceneId: string; text: string; audioUrl: string }> = [];
+
+  for (let i = 0; i < localized.scenes_ka.length; i = i + 1) {
+    const scene = localized.scenes_ka[i];
+    const narrationText = scene.narration_ka || scene.action_ka || scene.beat_ka;
+
+    if (!narrationText || narrationText.length < 5) {
+      voiceovers.push({
+        sceneId: scene.id,
+        text: "",
+        audioUrl: "",
+      });
+      continue;
+    }
+
+    try {
+      const response = await requestJson<any>(
+        "voiceover_generation",
+        config.elevenlabs.baseUrl + "/text-to-speech/" + config.elevenlabs.voiceId,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "xi-api-key": config.elevenlabs.apiKey,
+          },
+          body: JSON.stringify({
+            text: narrationText,
+            model_id: "eleven_multilingual_v2",
+            voice_settings: {
+              stability: 0.5,
+              similarity_boost: 0.75,
+              style: 0.0,
+              use_speaker_boost: true,
+            },
+          }),
+        },
+        config.defaultTimeoutMs * 2,
+        2
+      );
+
+      const audioUrl = config.elevenlabs.baseUrl + "/text-to-speech/" + config.elevenlabs.voiceId + "/stream?text=" + encodeURIComponent(narrationText);
+
+      voiceovers.push({
+        sceneId: scene.id,
+        text: narrationText,
+        audioUrl: audioUrl,
+      });
+
+      await sleep(1000);
+    } catch (error) {
+      voiceovers.push({
+        sceneId: scene.id,
+        text: narrationText,
+        audioUrl: "",
+      });
+    }
+  }
+
+  return { voiceovers: voiceovers };
+}
+
+async function stageVisualPrompts(
   edited: EditedStructure,
   input: PentagonInput,
   config: EnvConfig
-): Promise<GrokPromptPack> {
+): Promise<VisualPromptPack> {
   const styleHint = input.constraints?.style || "cinematic, professional, 4K, beautiful lighting";
 
   const lines: string[] = [];
@@ -650,7 +760,7 @@ async function stageGrok(
   };
 
   const response = await requestJson<any>(
-    "grok_visual_prompting",
+    "visual_prompting",
     config.xai.baseUrl + "/chat/completions",
     {
       method: "POST",
@@ -671,22 +781,22 @@ async function stageGrok(
 
   if (!content) {
     throw new PipelineError({
-      stage: "grok_visual_prompting",
+      stage: "visual_prompting",
       code: "INVALID_JSON",
-      message: "Grok response missing",
+      message: "Visual prompts response missing",
       retryable: false,
     });
   }
 
-  let prompts: GrokPromptPack;
+  let prompts: VisualPromptPack;
   try {
     const cleaned = cleanJsonString(content);
     prompts = JSON.parse(cleaned);
   } catch (error) {
     throw new PipelineError({
-      stage: "grok_visual_prompting",
+      stage: "visual_prompting",
       code: "INVALID_JSON",
-      message: "Failed to parse Grok JSON",
+      message: "Failed to parse visual prompts JSON",
       retryable: false,
       cause: error,
     });
@@ -694,23 +804,11 @@ async function stageGrok(
 
   if (!Array.isArray(prompts.shots) || prompts.shots.length === 0) {
     throw new PipelineError({
-      stage: "grok_visual_prompting",
+      stage: "visual_prompting",
       code: "INVALID_JSON",
-      message: "No shots generated by Grok",
+      message: "No shots generated",
       retryable: false,
     });
-  }
-
-  for (let i = 0; i < prompts.shots.length; i = i + 1) {
-    const shot = prompts.shots[i];
-    if (!shot.sceneId || !shot.prompt) {
-      throw new PipelineError({
-        stage: "grok_visual_prompting",
-        code: "INVALID_JSON",
-        message: "Grok shot missing required fields",
-        retryable: false,
-      });
-    }
   }
 
   return prompts;
@@ -727,12 +825,12 @@ function generateDeterministicSeed(requestId: string, sceneId: string): number {
   return Math.abs(hash);
 }
 
-async function stagePollinations(
-  prompts: GrokPromptPack,
+async function stageVideoRender(
+  prompts: VisualPromptPack,
   input: PentagonInput,
   config: EnvConfig
-): Promise<PollinationsRender[]> {
-  const renders: PollinationsRender[] = [];
+): Promise<VideoRender[]> {
+  const renders: VideoRender[] = [];
 
   for (let i = 0; i < prompts.shots.length; i = i + 1) {
     const shot = prompts.shots[i];
@@ -758,7 +856,7 @@ export async function runPentagonPipeline(input: PentagonInput): Promise<Pentago
 
   if (!input.requestId || !input.userPrompt) {
     throw new PipelineError({
-      stage: "deepseek_structure",
+      stage: "structure_generation",
       code: "BAD_REQUEST",
       message: "Missing requestId or userPrompt",
       retryable: false,
@@ -768,35 +866,40 @@ export async function runPentagonPipeline(input: PentagonInput): Promise<Pentago
   const config = loadEnvConfig();
 
   let t0 = Date.now();
-  const deepseek = await stageDeepSeek(input, config);
-  timings.deepseek_structure = Date.now() - t0;
+  const structure = await stageStructure(input, config);
+  timings.structure_generation = Date.now() - t0;
 
   t0 = Date.now();
-  const gpt = await stageGPT(deepseek, input, config);
+  const edited = await stageEdit(structure, input, config);
   timings.gpt_edit = Date.now() - t0;
 
   t0 = Date.now();
-  const gemini = await stageGemini(gpt, config);
-  timings.gemini_localize_ka = Date.now() - t0;
+  const localized = await stageLocalize(edited, config);
+  timings.georgian_localization = Date.now() - t0;
 
   t0 = Date.now();
-  const grok = await stageGrok(gpt, input, config);
-  timings.grok_visual_prompting = Date.now() - t0;
+  const voiceovers = await stageVoiceover(localized, config);
+  timings.voiceover_generation = Date.now() - t0;
 
   t0 = Date.now();
-  const pollinations = await stagePollinations(grok, input, config);
-  timings.pollinations_render = Date.now() - t0;
+  const visualPrompts = await stageVisualPrompts(edited, input, config);
+  timings.visual_prompting = Date.now() - t0;
+
+  t0 = Date.now();
+  const videos = await stageVideoRender(visualPrompts, input, config);
+  timings.video_rendering = Date.now() - t0;
 
   const finishedAt = new Date().toISOString();
-  const finalVideoUrl = pollinations.length > 0 ? pollinations[0].videoUrl : "";
+  const finalVideoUrl = videos.length > 0 ? videos[0].videoUrl : "";
 
   return {
     requestId: input.requestId,
-    deepseek: deepseek,
-    gpt: gpt,
-    gemini: gemini,
-    grok: grok,
-    pollinations: pollinations,
+    structure: structure,
+    edited: edited,
+    localized: localized,
+    voiceovers: voiceovers,
+    visualPrompts: visualPrompts,
+    videos: videos,
     finalVideoUrl: finalVideoUrl,
     meta: {
       startedAt: startedAt,
@@ -804,4 +907,89 @@ export async function runPentagonPipeline(input: PentagonInput): Promise<Pentago
       stageTimingsMs: timings,
     },
   };
+}
+```
+
+---
+
+## 🔧 ENV VARIABLES (.env.local)
+
+```bash
+# OpenAI
+OPENAI_API_KEY=sk-proj-...
+
+# ElevenLabs (ახალი!)
+ELEVENLABS_API_KEY=sk_...
+ELEVENLABS_VOICE_ID=pNInz6obpgDQGcFmaJgB
+
+# Grok/xAI
+XAI_API_KEY=xai-...
+
+# Optional
+DEFAULT_TIMEOUT_MS=30000
+```
+
+---
+
+## 🎤 ElevenLabs Voice IDs (Georgian Voices)
+
+| Voice ID | Name | Type | Language |
+|----------|------|------|----------|
+| `pNInz6obpgDQGcFmaJgB` | Adam | Male | Multilingual |
+| `21m00Tcm4TlvDq8ikWAM` | Rachel | Female | Multilingual |
+| `AZnzlk1XvdvUeBnXmlld` | Domi | Female | Multilingual |
+| `EXAVITQu4vr4xnSDxMaL` | Bella | Female | Multilingual |
+
+**Multilingual V2** model-ი მხარს უჭერს ქართულს! ✅
+
+---
+
+## 🚀 DEPLOY
+
+```bash
+git add lib/orchestrator/coordinator.ts
+git add .env.local
+git commit -m "feat: add ElevenLabs Georgian voiceover integration"
+git push origin main
+```
+
+---
+
+## ✅ Pipeline Stages (განახლებული):
+
+1. 🏗️ **Structure Generation** (GPT-4o-mini)
+2. ✂️ **Editing & Refinement** (GPT-4o-mini)
+3. 🇬🇪 **Georgian Localization** (GPT-4o-mini)
+4. 🎤 **Georgian Voiceover** (ElevenLabs) - **NEW!**
+5. 🎨 **Visual Prompts** (Grok)
+6. 🎥 **Video Rendering** (Pollinations)
+
+---
+
+## 📊 Output Example:
+
+```json
+{
+  "requestId": "req_123",
+  "structure": {...},
+  "edited": {...},
+  "localized": {
+    "title_ka": "ქართული მთების ჩასვლა",
+    "scenes_ka": [
+      {
+        "id": "scene_1",
+        "narration_ka": "მზე ჩადის კავკასიონის თოვლიან მწვერვალებზე..."
+      }
+    ]
+  },
+  "voiceovers": {
+    "voiceovers": [
+      {
+        "sceneId": "scene_1",
+        "text": "მზე ჩადის კავკასიონის თოვლიან მწვერვალებზე...",
+        "audioUrl": "https://api.elevenlabs.io/v1/..."
+      }
+    ]
+  },
+  "videos": [...]
 }
