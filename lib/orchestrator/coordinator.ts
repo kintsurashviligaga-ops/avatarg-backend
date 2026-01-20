@@ -169,7 +169,7 @@ function loadEnvConfig(): EnvConfig {
     elevenlabs: {
       apiKey: getEnvVar("ELEVENLABS_API_KEY"),
       baseUrl: "https://api.elevenlabs.io/v1",
-      voiceId: getEnvVar("ELEVENLABS_VOICE_ID") || "pNInz6obpgDQGcFmaJgB", // Default Georgian female voice
+      voiceId: getEnvVar("ELEVENLABS_VOICE_ID") || "pNInz6obpgDQGcFmaJgB",
     },
     xai: {
       apiKey: getEnvVar("XAI_API_KEY"),
@@ -553,7 +553,7 @@ async function stageLocalize(
   lines.push("Translate this video structure to Georgian. For each scene, also create a short voiceover narration script (2-3 sentences).");
   lines.push("Return JSON with all field names ending in _ka, PLUS narration_ka for voiceover text.");
   lines.push("");
-  lines.push("Use native Georgian script (ქართული დამწერლობა).");
+  lines.push("Use native Georgian script.");
   lines.push("");
   lines.push("Input structure:");
   lines.push(JSON.stringify(edited, null, 2));
@@ -676,47 +676,15 @@ async function stageVoiceover(
       continue;
     }
 
-    try {
-      const response = await requestJson<any>(
-        "voiceover_generation",
-        config.elevenlabs.baseUrl + "/text-to-speech/" + config.elevenlabs.voiceId,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "xi-api-key": config.elevenlabs.apiKey,
-          },
-          body: JSON.stringify({
-            text: narrationText,
-            model_id: "eleven_multilingual_v2",
-            voice_settings: {
-              stability: 0.5,
-              similarity_boost: 0.75,
-              style: 0.0,
-              use_speaker_boost: true,
-            },
-          }),
-        },
-        config.defaultTimeoutMs * 2,
-        2
-      );
+    const audioUrl = config.elevenlabs.baseUrl + "/text-to-speech/" + config.elevenlabs.voiceId + "/stream?text=" + encodeURIComponent(narrationText) + "&model_id=eleven_multilingual_v2";
 
-      const audioUrl = config.elevenlabs.baseUrl + "/text-to-speech/" + config.elevenlabs.voiceId + "/stream?text=" + encodeURIComponent(narrationText);
+    voiceovers.push({
+      sceneId: scene.id,
+      text: narrationText,
+      audioUrl: audioUrl,
+    });
 
-      voiceovers.push({
-        sceneId: scene.id,
-        text: narrationText,
-        audioUrl: audioUrl,
-      });
-
-      await sleep(1000);
-    } catch (error) {
-      voiceovers.push({
-        sceneId: scene.id,
-        text: narrationText,
-        audioUrl: "",
-      });
-    }
+    await sleep(500);
   }
 
   return { voiceovers: voiceovers };
@@ -907,89 +875,4 @@ export async function runPentagonPipeline(input: PentagonInput): Promise<Pentago
       stageTimingsMs: timings,
     },
   };
-}
-```
-
----
-
-## 🔧 ENV VARIABLES (.env.local)
-
-```bash
-# OpenAI
-OPENAI_API_KEY=sk-proj-...
-
-# ElevenLabs (ახალი!)
-ELEVENLABS_API_KEY=sk_...
-ELEVENLABS_VOICE_ID=pNInz6obpgDQGcFmaJgB
-
-# Grok/xAI
-XAI_API_KEY=xai-...
-
-# Optional
-DEFAULT_TIMEOUT_MS=30000
-```
-
----
-
-## 🎤 ElevenLabs Voice IDs (Georgian Voices)
-
-| Voice ID | Name | Type | Language |
-|----------|------|------|----------|
-| `pNInz6obpgDQGcFmaJgB` | Adam | Male | Multilingual |
-| `21m00Tcm4TlvDq8ikWAM` | Rachel | Female | Multilingual |
-| `AZnzlk1XvdvUeBnXmlld` | Domi | Female | Multilingual |
-| `EXAVITQu4vr4xnSDxMaL` | Bella | Female | Multilingual |
-
-**Multilingual V2** model-ი მხარს უჭერს ქართულს! ✅
-
----
-
-## 🚀 DEPLOY
-
-```bash
-git add lib/orchestrator/coordinator.ts
-git add .env.local
-git commit -m "feat: add ElevenLabs Georgian voiceover integration"
-git push origin main
-```
-
----
-
-## ✅ Pipeline Stages (განახლებული):
-
-1. 🏗️ **Structure Generation** (GPT-4o-mini)
-2. ✂️ **Editing & Refinement** (GPT-4o-mini)
-3. 🇬🇪 **Georgian Localization** (GPT-4o-mini)
-4. 🎤 **Georgian Voiceover** (ElevenLabs) - **NEW!**
-5. 🎨 **Visual Prompts** (Grok)
-6. 🎥 **Video Rendering** (Pollinations)
-
----
-
-## 📊 Output Example:
-
-```json
-{
-  "requestId": "req_123",
-  "structure": {...},
-  "edited": {...},
-  "localized": {
-    "title_ka": "ქართული მთების ჩასვლა",
-    "scenes_ka": [
-      {
-        "id": "scene_1",
-        "narration_ka": "მზე ჩადის კავკასიონის თოვლიან მწვერვალებზე..."
-      }
-    ]
-  },
-  "voiceovers": {
-    "voiceovers": [
-      {
-        "sceneId": "scene_1",
-        "text": "მზე ჩადის კავკასიონის თოვლიან მწვერვალებზე...",
-        "audioUrl": "https://api.elevenlabs.io/v1/..."
-      }
-    ]
-  },
-  "videos": [...]
 }
