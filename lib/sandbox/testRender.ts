@@ -1,151 +1,159 @@
-export const SHOTSTACK_TEST_RENDER = {
-  timeline: {
-    tracks: [
-      // Video Track
-      {
-        clips: [
-          {
-            asset: {
-              type: 'image',
-              src: 'https://shotstack-assets.s3.amazonaws.com/images/realestate1.jpg'
-            },
-            start: 0,
-            length: 5,
-            transition: {
-              in: 'fade',
-              out: 'fade'
-            },
-            effect: 'zoomIn'
-          },
-          {
-            asset: {
-              type: 'image',
-              src: 'https://shotstack-assets.s3.amazonaws.com/images/realestate2.jpg'
-            },
-            start: 5,
-            length: 5,
-            transition: {
-              in: 'fade',
-              out: 'fade'
-            },
-            effect: 'slideRight'
-          },
-          {
-            asset: {
-              type: 'image',
-              src: 'https://shotstack-assets.s3.amazonaws.com/images/realestate3.jpg'
-            },
-            start: 10,
-            length: 5,
-            transition: {
-              in: 'fade',
-              out: 'fade'
-            },
-            effect: 'zoomOut'
-          }
-        ]
-      },
-      // Audio Track
-      {
-        clips: [
-          {
-            asset: {
-              type: 'audio',
-              src: 'https://shotstack-assets.s3.amazonaws.com/music/disco.mp3'
-            },
-            start: 0,
-            length: 15,
-            volume: 0.5
-          }
-        ]
-      },
-      // Title Track (Text Overlay)
-      {
-        clips: [
-          {
-            asset: {
-              type: 'title',
-              text: 'Avatar G Test Render',
-              style: 'future',
-              color: '#ffffff',
-              size: 'medium'
-            },
-            start: 0,
-            length: 3,
-            transition: {
-              in: 'fade',
-              out: 'fade'
-            },
-            position: 'center'
-          },
-          {
-            asset: {
-              type: 'title',
-              text: 'Sandbox Mode Active',
-              style: 'minimal',
-              color: '#00ff00',
-              size: 'small'
-            },
-            start: 12,
-            length: 3,
-            position: 'bottom'
-          }
-        ]
+'use client';
+
+import { useState, useEffect, useRef } from 'react';
+
+export default function SandboxTestUI() {
+  const [prompt, setPrompt] = useState('');
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [status, setStatus] = useState<string>('');
+  const [progress, setProgress] = useState<number>(0);
+  const [timeline, setTimeline] = useState<any>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const pollingRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Start orchestration
+  const handleSubmit = async () => {
+    if (!prompt.trim()) return;
+
+    setLoading(true);
+    setError(null);
+    setJobId(null);
+    setStatus('');
+    setTimeline(null);
+
+    try {
+      const response = await fetch('/api/v1/orchestrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: 'test-user-123', // Sandbox mock user
+          userPrompt: prompt,
+          brandContext: {}
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Request failed: ${response.status}`);
       }
-    ]
-  },
-  output: {
-    format: 'mp4',
-    resolution: 'sd', // Use 'sd' for sandbox, 'hd' for production
-    fps: 25,
-    quality: 'medium'
-  }
-};
 
-/**
- * Test function to verify Shotstack integration
- */
-export async function submitTestRender(): Promise<string> {
-  const response = await fetch('https://api.shotstack.io/v1/render', {
-    method: 'POST',
-    headers: {
-      'x-api-key': process.env.SHOTSTACK_API_KEY!,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(SHOTSTACK_TEST_RENDER)
-  });
+      const data = await response.json();
 
-  if (!response.ok) {
-    throw new Error(`Shotstack test render failed: ${response.status}`);
-  }
-
-  const data = await response.json();
-  return data.response.id;
-}
-
-/**
- * Poll render status
- */
-export async function checkRenderStatus(renderId: string): Promise<{
-  status: string;
-  url?: string;
-  error?: string;
-}> {
-  const response = await fetch(`https://api.shotstack.io/v1/render/${renderId}`, {
-    headers: {
-      'x-api-key': process.env.SHOTSTACK_API_KEY!
+      if (data.success && data.renderJobId) {
+        setJobId(data.renderJobId);
+        setStatus('queued');
+        startPolling(data.renderJobId);
+      } else {
+        setError(data.error || 'Unknown error');
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
     }
-  });
-
-  if (!response.ok) {
-    throw new Error(`Status check failed: ${response.status}`);
-  }
-
-  const data = await response.json();
-  
-  return {
-    status: data.response.status,
-    url: data.response.url,
-    error: data.response.error
   };
-  }
+
+  // Poll job status
+  const startPolling = (id: string) => {
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current);
+    }
+
+    pollingRef.current = setInterval(async () => {
+      try {
+        const response = await fetch(`/api/v1/orchestrate?jobId=${id}`);
+        if (!response.ok) {
+          throw new Error(`Polling failed: ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        setStatus(data.status || 'unknown');
+        setProgress(data.progress || 0);
+
+        if (data.shotstack?.timelineJson) {
+          setTimeline(data.shotstack.timelineJson);
+        }
+
+        if (data.error) {
+          setError(`${data.error.code}: ${data.error.message}`);
+          stopPolling();
+        }
+
+        // Stop polling on terminal states
+        if (data.status === 'completed' || data.status === 'failed') {
+          stopPolling();
+        }
+      } catch (err: any) {
+        setError(err.message);
+        stopPolling();
+      }
+    }, 3000); // Poll every 3 seconds
+  };
+
+  const stopPolling = () => {
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current);
+      pollingRef.current = null;
+    }
+  };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => stopPolling();
+  }, []);
+
+  return (
+    <div style={{ padding: '20px', maxWidth: '800px', margin: '0 auto' }}>
+      <h1>Avatar G - Sandbox Test UI</h1>
+      <p style={{ color: '#666' }}>Environment: Sandbox | Shotstack Only</p>
+
+      <div style={{ marginBottom: '20px' }}>
+        <textarea
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          placeholder="Enter your video prompt..."
+          rows={4}
+          style={{ width: '100%', padding: '10px', fontSize: '14px' }}
+        />
+        <button
+          onClick={handleSubmit}
+          disabled={loading || !!jobId}
+          style={{
+            marginTop: '10px',
+            padding: '10px 20px',
+            fontSize: '14px',
+            cursor: loading || jobId ? 'not-allowed' : 'pointer'
+          }}
+        >
+          {loading ? 'Submitting...' : 'Generate Video'}
+        </button>
+      </div>
+
+      {jobId && (
+        <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#f5f5f5' }}>
+          <h3>Job Status</h3>
+          <p><strong>Job ID:</strong> {jobId}</p>
+          <p><strong>Status:</strong> {status}</p>
+          <p><strong>Progress:</strong> {Math.round(progress * 100)}%</p>
+        </div>
+      )}
+
+      {error && (
+        <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#ffe6e6', color: '#cc0000' }}>
+          <h3>Error</h3>
+          <pre>{error}</pre>
+        </div>
+      )}
+
+      {timeline && (
+        <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#e6ffe6' }}>
+          <h3>Shotstack Timeline (Ready)</h3>
+          <pre style={{ overflow: 'auto', maxHeight: '300px', fontSize: '12px' }}>
+            {JSON.stringify(timeline, null, 2)}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+    }
