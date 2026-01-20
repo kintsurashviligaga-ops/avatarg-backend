@@ -46,6 +46,11 @@ export default function PentagonTestPage() {
     }
   };
 
+  const calculateTotalTime = (timings: any): number => {
+    if (!timings) return 0;
+    return Object.values(timings).reduce((acc: number, val: any) => acc + (Number(val) || 0), 0);
+  };
+
   return (
     <div style={{ padding: '40px', maxWidth: '1200px', margin: '0 auto', fontFamily: 'sans-serif' }}>
       <h1 style={{ fontSize: '36px', marginBottom: '10px' }}>🎬 AI Pentagon Video Generator</h1>
@@ -188,14 +193,14 @@ export default function PentagonTestPage() {
                   <div key={stage} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
                     <span style={{ fontSize: '14px' }}>{stage}</span>
                     <span style={{ fontSize: '14px', fontWeight: 'bold', color: '#3b82f6' }}>
-                      {(ms / 1000).toFixed(2)}s
+                      {((Number(ms) || 0) / 1000).toFixed(2)}s
                     </span>
                   </div>
                 ))}
                 <div style={{ borderTop: '2px solid #ddd', marginTop: '10px', paddingTop: '10px', display: 'flex', justifyContent: 'space-between' }}>
                   <span style={{ fontSize: '16px', fontWeight: 'bold' }}>Total Time</span>
                   <span style={{ fontSize: '16px', fontWeight: 'bold', color: '#8b5cf6' }}>
-                    {(Object.values(result.meta.stageTimingsMs).reduce((a: any, b: any) => a + b, 0) / 1000).toFixed(2)}s
+                    {(calculateTotalTime(result.meta.stageTimingsMs) / 1000).toFixed(2)}s
                   </span>
                 </div>
               </div>
@@ -222,4 +227,4 @@ export default function PentagonTestPage() {
       )}
     </div>
   );
-            }
+          }
