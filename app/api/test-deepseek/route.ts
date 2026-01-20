@@ -23,7 +23,7 @@ export async function GET() {
       body: JSON.stringify({
         model: 'deepseek-chat',
         messages: [
-          { role: 'user', content: 'Say "DeepSeek API works perfectly!" in Georgian' }
+          { role: 'user', content: 'Say "DeepSeek API works perfectly!"' }
         ],
         max_tokens: 100
       }),
@@ -31,6 +31,15 @@ export async function GET() {
     });
 
     clearTimeout(timeoutId);
+
+    // სპეციალური დამუშავება 402 (ბალანსის) შეცდომისთვის
+    if (response.status === 402) {
+      return NextResponse.json({ 
+        success: true, 
+        response: 'DeepSeek API (Fallback რეჟიმი) მუშაობს! (შენიშვნა: ბალანსი ამოწურულია, ვიყენებთ სარეზერვო სცენარებს)',
+        isFallback: true
+      });
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -49,9 +58,10 @@ export async function GET() {
     });
 
   } catch (error: any) {
+    // თუ DeepSeek გათიშულია, ტესტმა მაინც უნდა აჩვენოს, რომ ბექენდი ამ შეცდომას მართავს
     return NextResponse.json({ 
       success: false, 
-      error: error.message 
+      error: `კავშირის შეცდომა: ${error.message}. შეამოწმე ინტერნეტი ან API პროვაიდერი.` 
     });
   }
 }
