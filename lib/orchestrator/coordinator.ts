@@ -1,6 +1,6 @@
 // lib/orchestrator/coordinator.ts
-// AI Pentagon Pipeline: Gemini 1.5 Flash → GPT-4o → Gemini → Grok → Pollinations
-// Production-ready with v1beta API and gemini-1.5-flash (Stable, generous free tier)
+// AI Pentagon Pipeline: GPT-4o → GPT-4o → GPT-4o → Grok → Pollinations
+// Production-ready with OpenAI only (NO Gemini dependencies)
 
 export type PipelineStage =
   | "deepseek_structure"
@@ -114,7 +114,6 @@ export class PipelineError extends Error {
 
 interface EnvConfig {
   openai: { apiKey: string; baseUrl: string; model: string };
-  gemini: { apiKey: string; baseUrl: string; model: string };
   xai: { apiKey: string; baseUrl: string; model: string };
   pollinations: { baseUrl: string; videoBaseUrl: string };
   defaultTimeoutMs: number;
@@ -127,7 +126,6 @@ function getEnvVar(key: string): string {
 function loadEnvConfig(): EnvConfig {
   const required: string[] = [
     "OPENAI_API_KEY",
-    "GEMINI_API_KEY",
     "XAI_API_KEY",
   ];
 
@@ -154,11 +152,6 @@ function loadEnvConfig(): EnvConfig {
       apiKey: getEnvVar("OPENAI_API_KEY"),
       baseUrl: "https://api.openai.com/v1",
       model: "gpt-4o-mini",
-    },
-    gemini: {
-      apiKey: getEnvVar("GEMINI_API_KEY"),
-      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
-      model: "gemini-1.5-flash",
     },
     xai: {
       apiKey: getEnvVar("XAI_API_KEY"),
@@ -362,34 +355,35 @@ async function stageDeepSeek(
 
   const systemPrompt = lines.join("\n");
 
-  const url = config.gemini.baseUrl + "/models/" + config.gemini.model + ":generateContent?key=" + config.gemini.apiKey;
+  const requestBody = {
+    model: config.openai.model,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: input.userPrompt },
+    ],
+    temperature: 0.7,
+    max_tokens: 3000,
+    response_format: { type: "json_object" },
+  };
 
   const response = await requestJson<any>(
     "deepseek_structure",
-    url,
+    config.openai.baseUrl + "/chat/completions",
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: systemPrompt }],
-          },
-        ],
-        generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: 3000,
-        },
-      }),
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + config.openai.apiKey,
+      },
+      body: JSON.stringify(requestBody),
     },
     config.defaultTimeoutMs,
     2
   );
 
   let content = "";
-  if (response.candidates && response.candidates[0] && response.candidates[0].content && response.candidates[0].content.parts && response.candidates[0].content.parts[0] && response.candidates[0].content.parts[0].text) {
-    content = response.candidates[0].content.parts[0].text;
+  if (response.choices && response.choices[0] && response.choices[0].message && response.choices[0].message.content) {
+    content = response.choices[0].message.content;
   }
 
   if (!content) {
@@ -460,6 +454,7 @@ async function stageGPT(
     ],
     temperature: 0.5,
     max_tokens: 3000,
+    response_format: { type: "json_object" },
   };
 
   const response = await requestJson<any>(
@@ -551,41 +546,42 @@ async function stageGemini(
 
   const systemPrompt = lines.join("\n");
 
-  const url = config.gemini.baseUrl + "/models/" + config.gemini.model + ":generateContent?key=" + config.gemini.apiKey;
+  const requestBody = {
+    model: config.openai.model,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: JSON.stringify(edited) },
+    ],
+    temperature: 0.3,
+    max_tokens: 4000,
+    response_format: { type: "json_object" },
+  };
 
   const response = await requestJson<any>(
     "gemini_localize_ka",
-    url,
+    config.openai.baseUrl + "/chat/completions",
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: systemPrompt }],
-          },
-        ],
-        generationConfig: {
-          temperature: 0.3,
-          maxOutputTokens: 4000,
-        },
-      }),
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + config.openai.apiKey,
+      },
+      body: JSON.stringify(requestBody),
     },
     config.defaultTimeoutMs,
     2
   );
 
   let content = "";
-  if (response.candidates && response.candidates[0] && response.candidates[0].content && response.candidates[0].content.parts && response.candidates[0].content.parts[0] && response.candidates[0].content.parts[0].text) {
-    content = response.candidates[0].content.parts[0].text;
+  if (response.choices && response.choices[0] && response.choices[0].message && response.choices[0].message.content) {
+    content = response.choices[0].message.content;
   }
 
   if (!content) {
     throw new PipelineError({
       stage: "gemini_localize_ka",
       code: "INVALID_JSON",
-      message: "Gemini localization response missing",
+      message: "Localization response missing",
       retryable: false,
     });
   }
@@ -598,7 +594,7 @@ async function stageGemini(
     throw new PipelineError({
       stage: "gemini_localize_ka",
       code: "INVALID_JSON",
-      message: "Failed to parse Gemini JSON",
+      message: "Failed to parse localization JSON",
       retryable: false,
       cause: error,
     });
