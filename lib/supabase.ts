@@ -1,20 +1,38 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-let supabaseInstance: SupabaseClient | null = null;
+let adminClient: SupabaseClient | null = null;
 
-export const supabase = (() => {
-  if (supabaseInstance) {
-    return supabaseInstance;
+function createAdminClient(): SupabaseClient {
+  if (adminClient) {
+    return adminClient;
   }
 
   const supabaseUrl = process.env.VITE_SUPABASE_URL;
-  const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY;
+  const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-  if (!supabaseUrl || !supabaseAnonKey) {
-    throw new Error('Missing Supabase environment variables: VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY');
+  if (!supabaseUrl || !supabaseServiceKey) {
+    throw new Error('Missing Supabase admin environment variables: VITE_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
   }
 
-  supabaseInstance = createClient(supabaseUrl, supabaseAnonKey);
+  adminClient = createClient(supabaseUrl, supabaseServiceKey, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false
+    }
+  });
 
-  return supabaseInstance;
-})();
+  return adminClient;
+}
+
+// Export as getter function to avoid build-time initialization
+export const getSupabaseAdmin = (): SupabaseClient => {
+  return createAdminClient();
+};
+
+// Legacy export for backward compatibility
+export const supabaseAdmin = new Proxy({} as SupabaseClient, {
+  get: (target, prop) => {
+    const client = createAdminClient();
+    return (client as any)[prop];
+  }
+});
