@@ -5,30 +5,32 @@ export const runtime = 'nodejs';
 
 export async function POST(request: NextRequest) {
   try {
-    // დინამიური იმპორტი სწორია
     const { ProductionCoordinator } = await import('@/lib/orchestrator/coordinator');
     
     const body = await request.json();
-    
-    // ვამატებთ შემოწმებას prompt-ზე (რასაც რეალურად აგზავნის ფორმა)
     const userId = body.userId || 'anonymous';
     const userPrompt = body.userPrompt || body.prompt; 
 
     if (!userPrompt) {
       return NextResponse.json(
-        { error: 'პრომპტი ცარიელია. გთხოვთ შეიყვანოთ დავალება.' },
+        { error: 'პრომპტი ცარიელია' },
         { status: 400 }
       );
     }
 
     const coordinator = new ProductionCoordinator();
     
-    // ვიყენებთ startVideoProduction-ს, რადგან coordinator.ts-ში ასე მივუთითეთ
-    const result = await coordinator.startVideoProduction(userPrompt, userId);
+    // აქ შევცვალე 'startVideoProduction' -> 'orchestrate'-ით
+    // რადგან შენს ორიგინალ კოორდინატორში ფუნქციას 'orchestrate' ჰქვია
+    const result = await coordinator.orchestrate({
+      userId,
+      userPrompt,
+      brandContext: body.brandContext || {}
+    });
 
     return NextResponse.json({
       success: true,
-      jobId: result.id,
+      jobId: result.id || result.jobId,
       status: result.status
     });
   } catch (error: any) {
@@ -48,10 +50,7 @@ export async function GET(request: NextRequest) {
     const jobId = searchParams.get('jobId');
 
     if (!jobId) {
-      return NextResponse.json(
-        { error: 'Job ID არ არის მითითებული' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'Missing jobId' }, { status: 400 });
     }
 
     const coordinator = new ProductionCoordinator();
@@ -59,10 +58,6 @@ export async function GET(request: NextRequest) {
     
     return NextResponse.json(status);
   } catch (error: any) {
-    console.error('[API] Orchestrate GET error:', error);
-    return NextResponse.json(
-      { error: 'Job ვერ მოიძებნა ან სისტემური შეცდომაა' },
-      { status: 404 }
-    );
+    return NextResponse.json({ error: error.message }, { status: 404 });
   }
 }
