@@ -18,6 +18,23 @@ export class ProductionCoordinator {
     try {
       console.log(`[Coordinator] Starting job ${jobId}`);
 
+      // AUTO-CREATE USER IF NOT EXISTS
+      const { error: userError } = await supabaseAdmin
+        .from('profiles')
+        .upsert({
+          id: input.userId,
+          email: `user-${input.userId}@avatarg.ai`,
+          tier: 'FREE',
+          credits_balance: 100
+        }, {
+          onConflict: 'id',
+          ignoreDuplicates: true
+        });
+
+      if (userError) {
+        console.warn('[Coordinator] User creation warning:', userError);
+      }
+
       // Create job record
       const { error: jobError } = await supabaseAdmin.from('jobs').insert({
         id: jobId,
@@ -206,7 +223,6 @@ export class ProductionCoordinator {
   }
 
   private async getAssets(jobId: string): Promise<{ images: string[]; audio: string }> {
-    // Sandbox: always use fallbacks
     console.log(`[Job ${jobId}] Using fallback assets (sandbox mode)`);
     
     const images = FALLBACK_IMAGES.slice(0, 3);
@@ -366,4 +382,4 @@ export class ProductionCoordinator {
     };
     return map[status] || 0;
   }
-        }
+      }
