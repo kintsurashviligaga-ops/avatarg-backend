@@ -2,12 +2,13 @@
 
 import { useState, useEffect, useRef } from 'react';
 
-export default function SandboxTestUI() {
+export default function ProductionTestUI() {
   const [prompt, setPrompt] = useState('');
   const [jobId, setJobId] = useState<string | null>(null);
   const [status, setStatus] = useState<string>('');
   const [progress, setProgress] = useState<number>(0);
   const [timeline, setTimeline] = useState<any>(null);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
@@ -23,6 +24,7 @@ export default function SandboxTestUI() {
     setJobId(null);
     setStatus('');
     setTimeline(null);
+    setVideoUrl(null);
     setProgress(0);
 
     try {
@@ -77,6 +79,10 @@ export default function SandboxTestUI() {
           setTimeline(data.shotstack.timelineJson);
         }
 
+        if (data.videoUrl) {
+          setVideoUrl(data.videoUrl);
+        }
+
         if (data.error) {
           setError(`${data.error.code}: ${data.error.message}`);
           stopPolling();
@@ -116,8 +122,8 @@ export default function SandboxTestUI() {
   const getStatusText = (currentStatus: string) => {
     const statusMap: Record<string, string> = {
       'queued': 'რიგში დგას',
-      'running': 'მუშავდება',
-      'waiting_provider': 'Shotstack-ზე იგზავნება',
+      'running': 'მუშავდება (AI)',
+      'waiting_provider': 'ვიდეო იწერება',
       'completed': 'დასრულებულია',
       'failed': 'შეცდომა',
       'canceled': 'გაუქმებულია'
@@ -146,7 +152,7 @@ export default function SandboxTestUI() {
             Avatar G
           </h1>
           <p style={{ fontSize: '18px', color: '#94a3b8' }}>
-            Sandbox Testing Environment
+            AI Video Generation Platform
           </p>
           <div style={{ 
             display: 'inline-block',
@@ -157,7 +163,7 @@ export default function SandboxTestUI() {
             fontSize: '14px',
             border: '1px solid #334155'
           }}>
-            🧪 Shotstack Sandbox Mode
+            🚀 Production Mode - Real AI + Video Rendering
           </div>
         </div>
 
@@ -211,7 +217,7 @@ export default function SandboxTestUI() {
               transition: 'all 0.2s'
             }}
           >
-            {loading ? '⏳ იგზავნება...' : jobId ? '✅ დავალება გაგზავნილია' : '🚀 ვიდეოს გენერაცია'}
+            {loading ? '⏳ იგზავნება...' : jobId ? '✅ დავალება გაგზავნილია' : '🎬 ვიდეოს გენერაცია'}
           </button>
         </div>
 
@@ -285,6 +291,90 @@ export default function SandboxTestUI() {
               }}>
                 {Math.round(progress * 100)}%
               </div>
+
+              {/* Rendering info */}
+              {status === 'waiting_provider' && (
+                <div style={{
+                  marginTop: '16px',
+                  padding: '12px',
+                  background: '#0f172a',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  color: '#fbbf24'
+                }}>
+                  ⏳ ვიდეო იწერება Shotstack-ზე... (1-3 წუთი)
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Video Player Section */}
+        {videoUrl && (
+          <div style={{ 
+            background: '#1e293b',
+            borderRadius: '16px',
+            padding: '32px',
+            marginBottom: '24px',
+            border: '1px solid #334155'
+          }}>
+            <h3 style={{ marginBottom: '16px', fontSize: '20px', fontWeight: '600' }}>
+              🎬 თქვენი ვიდეო მზადაა!
+            </h3>
+            <div style={{
+              background: '#0f172a',
+              borderRadius: '12px',
+              padding: '20px',
+              marginBottom: '16px'
+            }}>
+              <video
+                src={videoUrl}
+                controls
+                autoPlay
+                style={{
+                  width: '100%',
+                  borderRadius: '8px',
+                  maxHeight: '500px'
+                }}
+              />
+            </div>
+            <div style={{
+              display: 'flex',
+              gap: '12px',
+              flexWrap: 'wrap'
+            }}>
+              <a
+                href={videoUrl}
+                download
+                style={{
+                  padding: '12px 24px',
+                  background: 'linear-gradient(to right, #3b82f6, #8b5cf6)',
+                  color: '#ffffff',
+                  borderRadius: '8px',
+                  textDecoration: 'none',
+                  fontWeight: '600',
+                  fontSize: '14px'
+                }}
+              >
+                📥 ჩამოტვირთვა
+              </a>
+              <a
+                href={videoUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  padding: '12px 24px',
+                  background: '#1e293b',
+                  color: '#60a5fa',
+                  border: '2px solid #334155',
+                  borderRadius: '8px',
+                  textDecoration: 'none',
+                  fontWeight: '600',
+                  fontSize: '14px'
+                }}
+              >
+                🔗 ახალ ფანჯარაში გახსნა
+              </a>
             </div>
           </div>
         )}
@@ -316,17 +406,22 @@ export default function SandboxTestUI() {
           </div>
         )}
 
-        {/* Timeline Section */}
+        {/* Timeline Section (collapsible) */}
         {timeline && (
-          <div style={{ 
+          <details style={{ 
             background: '#1e293b',
             borderRadius: '16px',
             padding: '32px',
             border: '1px solid #334155'
           }}>
-            <h3 style={{ marginBottom: '16px', fontSize: '20px', fontWeight: '600' }}>
-              ✅ Shotstack Timeline (მზადაა)
-            </h3>
+            <summary style={{ 
+              fontSize: '18px', 
+              fontWeight: '600',
+              cursor: 'pointer',
+              marginBottom: '16px'
+            }}>
+              🔧 Technical Details (Shotstack Timeline)
+            </summary>
             <div style={{ 
               background: '#0f172a',
               borderRadius: '12px',
@@ -343,9 +438,9 @@ export default function SandboxTestUI() {
                 {JSON.stringify(timeline, null, 2)}
               </pre>
             </div>
-          </div>
+          </details>
         )}
       </div>
     </div>
   );
-}
+            }
