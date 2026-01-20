@@ -1,28 +1,26 @@
 export class ProductionCoordinator {
-  async orchestrate({ userId, userPrompt, brandContext }: any) {
-    console.log(`[Coordinator] Processing prompt: ${userPrompt}`);
-    
+  async orchestrate({ userId, userPrompt }: any) {
     // 1. Grok წერს სცენარს
     const script = await this.generateVideoScript(userPrompt);
     
-    // 2. Pollinations AI ქმნის 4 უნიკალურ სურათს (უფასოდ და გასაღების გარეშე)
+    // 2. Pollinations AI ქმნის 4 სხვადასხვა სურათს
     const visuals = [1, 2, 3, 4].map(i => ({
       scene: i,
-      // ვიყენებთ encodeURIComponent-ს, რომ ტექსტი სწორად გადაეცეს URL-ს
-      url: `https://image.pollinations.ai/prompt/${encodeURIComponent(userPrompt + ' high quality cinematic scene ' + i)}?width=1280&height=720&nologo=true&seed=${Math.floor(Math.random() * 1000)}`
+      // ვიყენებთ დინამიურ Seed-ს, რომ ყოველთვის ახალი სურათი მივიღოთ
+      url: `https://image.pollinations.ai/prompt/${encodeURIComponent(userPrompt + ' cinematic scene ' + i)}?width=1280&height=720&nologo=true&seed=${Math.floor(Math.random() * 1000000)}`
     }));
 
     return {
-      id: `job_${Date.now()}`,
+      jobId: `job_${Date.now()}`,
       status: 'processing',
       script: script,
-      images: visuals
+      visuals: visuals
     };
   }
 
   async generateVideoScript(userPrompt: string) {
     const apiKey = process.env.XAI_API_KEY;
-    if (!apiKey) return "Grok API Key missing. Scene: Horse meets Squirrel.";
+    if (!apiKey) return "Grok Key missing. Script: Adventure of a hero.";
 
     try {
       const response = await fetch('https://api.x.ai/v1/chat/completions', {
@@ -33,10 +31,7 @@ export class ProductionCoordinator {
         },
         body: JSON.stringify({
           model: 'grok-beta',
-          messages: [
-            { role: 'system', content: 'You are a video script writer. Create a 4-scene story based on the prompt.' },
-            { role: 'user', content: userPrompt }
-          ]
+          messages: [{ role: 'user', content: `Create a 4-scene video script for: ${userPrompt}` }]
         })
       });
       const data = await response.json();
@@ -46,7 +41,7 @@ export class ProductionCoordinator {
     }
   }
 
-  async getJobStatus(jobId: string) {
-    return { id: jobId, status: 'completed' };
+  async getJobStatus(id: string) {
+    return { id, status: 'completed' };
   }
 }
