@@ -10,7 +10,7 @@ export async function POST(request: NextRequest) {
 
     if (!userId || !userPrompt) {
       return NextResponse.json(
-        { error: 'Missing userId or userPrompt' },
+        { error: 'Missing required fields: userId and userPrompt' },
         { status: 400 }
       );
     }
@@ -18,7 +18,7 @@ export async function POST(request: NextRequest) {
     const result = await coordinator.orchestrate({
       userId,
       userPrompt,
-      brandContext
+      brandContext: brandContext || {}
     });
 
     return NextResponse.json(result);
@@ -49,7 +49,7 @@ export async function GET(request: NextRequest) {
     console.error('[API] Orchestrate GET error:', error);
     return NextResponse.json(
       { error: error.message },
-      { status: 500 }
+      { status: 404 }
     );
   }
 }
