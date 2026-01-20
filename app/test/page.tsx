@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 
-export default function SandboxTestPage() {
+export default function SandboxTestUI() {
   const [prompt, setPrompt] = useState('');
   const [jobId, setJobId] = useState<string | null>(null);
   const [status, setStatus] = useState<string>('');
@@ -12,6 +12,7 @@ export default function SandboxTestPage() {
   const [loading, setLoading] = useState(false);
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Start orchestration
   const handleSubmit = async () => {
     if (!prompt.trim()) {
       setError('გთხოვთ შეიყვანოთ პრომპტი');
@@ -42,6 +43,7 @@ export default function SandboxTestPage() {
 
       const data = await response.json();
 
+      // FIX: Changed from data.renderJobId to data.jobId
       if (data.success && data.jobId) {
         setJobId(data.jobId);
         setStatus('queued');
@@ -56,6 +58,7 @@ export default function SandboxTestPage() {
     }
   };
 
+  // Poll job status
   const startPolling = (id: string) => {
     if (pollingRef.current) {
       clearInterval(pollingRef.current);
@@ -82,6 +85,7 @@ export default function SandboxTestPage() {
           stopPolling();
         }
 
+        // Stop polling on terminal states
         if (data.status === 'completed' || data.status === 'failed') {
           stopPolling();
         }
@@ -89,7 +93,7 @@ export default function SandboxTestPage() {
         setError(err.message);
         stopPolling();
       }
-    }, 3000);
+    }, 3000); // Poll every 3 seconds
   };
 
   const stopPolling = () => {
@@ -99,6 +103,7 @@ export default function SandboxTestPage() {
     }
   };
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => stopPolling();
   }, []);
@@ -346,4 +351,4 @@ export default function SandboxTestPage() {
       </div>
     </div>
   );
-    }
+      }
