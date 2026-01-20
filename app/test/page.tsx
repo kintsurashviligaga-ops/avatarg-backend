@@ -30,7 +30,7 @@ export default function SandboxTestUI() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          userId: 'test-user-' + Date.now(),
+          userId: '00000000-0000-0000-0000-000000000001',
           userPrompt: prompt,
           brandContext: {}
         })
@@ -133,6 +133,7 @@ export default function SandboxTestUI() {
       padding: '40px 20px'
     }}>
       <div style={{ maxWidth: '900px', margin: '0 auto' }}>
+        {/* Header */}
         <div style={{ marginBottom: '40px', textAlign: 'center' }}>
           <h1 style={{ 
             fontSize: '42px', 
@@ -160,6 +161,7 @@ export default function SandboxTestUI() {
           </div>
         </div>
 
+        {/* Input Section */}
         <div style={{ 
           background: '#1e293b',
           borderRadius: '16px',
@@ -213,6 +215,7 @@ export default function SandboxTestUI() {
           </button>
         </div>
 
+        {/* Status Section */}
         {jobId && (
           <div style={{ 
             background: '#1e293b',
@@ -260,6 +263,7 @@ export default function SandboxTestUI() {
                 </span>
               </div>
 
+              {/* Progress Bar */}
               <div style={{ 
                 background: '#0f172a',
                 borderRadius: '10px',
@@ -285,6 +289,7 @@ export default function SandboxTestUI() {
           </div>
         )}
 
+        {/* Error Section */}
         {error && (
           <div style={{ 
             background: '#7f1d1d',
@@ -293,7 +298,7 @@ export default function SandboxTestUI() {
             padding: '20px',
             marginBottom: '24px'
           }}>
-            <h3 style={{ marginBottom: '12px', fontSize: '18px' }}>
+            <h3 style={{ marginBottom: '12px', fontSize: '18px', display: 'flex', alignItems: 'center' }}>
               ❌ შეცდომა
             </h3>
             <pre style={{ 
@@ -302,13 +307,16 @@ export default function SandboxTestUI() {
               background: '#450a0a',
               padding: '12px',
               borderRadius: '8px',
-              margin: 0
+              margin: 0,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word'
             }}>
               {error}
             </pre>
           </div>
         )}
 
+        {/* Timeline Section */}
         {timeline && (
           <div style={{ 
             background: '#1e293b',
