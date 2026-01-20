@@ -14,7 +14,8 @@ export async function GET() {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 15000);
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+    // სწორი მოდელის სახელი: gemini-1.5-flash-latest
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`;
 
     const response = await fetch(url, {
       method: 'POST',
@@ -23,7 +24,7 @@ export async function GET() {
         contents: [{
           role: 'user',
           parts: [{
-            text: 'Say "Gemini API works perfectly!" in Georgian'
+            text: 'Say "Gemini API სრულყოფილად მუშაობს!"'
           }]
         }]
       }),
