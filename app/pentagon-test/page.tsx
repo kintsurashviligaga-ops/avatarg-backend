@@ -24,9 +24,11 @@ export default function PentagonTestPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           userPrompt: prompt,
-          maxScenes: 5,
-          maxDurationSec: 90,
-          style: 'cinematic, professional, 4K, beautiful lighting',
+          constraints: {
+            maxScenes: 5,
+            maxDurationSec: 90,
+            style: 'cinematic, professional, 4K, beautiful lighting',
+          },
         }),
       });
 
@@ -48,14 +50,14 @@ export default function PentagonTestPage() {
     <div style={{ padding: '40px', maxWidth: '1200px', margin: '0 auto', fontFamily: 'sans-serif' }}>
       <h1 style={{ fontSize: '36px', marginBottom: '10px' }}>🎬 AI Pentagon Video Generator</h1>
       <p style={{ color: '#666', marginBottom: '30px' }}>
-        DeepSeek → GPT-4o → Gemini → Grok → Pollinations AI
+        GPT-4o → GPT-4o → GPT-4o → ElevenLabs → Grok → Pollinations AI
       </p>
 
       <div style={{ marginBottom: '20px' }}>
         <textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          placeholder="Enter your video idea (e.g., 'Create a cinematic video about Georgian mountains')"
+          placeholder="Create a cinematic video about Georgian mountains at sunset"
           rows={4}
           style={{
             width: '100%',
@@ -85,7 +87,7 @@ export default function PentagonTestPage() {
       </div>
 
       {error && (
-        <div style={{ background: '#fee', padding: '20px', borderRadius: '8px', marginBottom: '20px' }}>
+        <div style={{ background: '#fee', padding: '20px', borderRadius: '8px', marginBottom: '20px', color: '#c00' }}>
           <strong>Error:</strong> {error}
         </div>
       )}
@@ -94,7 +96,7 @@ export default function PentagonTestPage() {
         <div>
           <h2 style={{ fontSize: '24px', marginBottom: '20px' }}>✅ Video Generated!</h2>
 
-          {/* VIDEO PLAYER */}
+          {/* MAIN VIDEO */}
           <div style={{ background: '#000', borderRadius: '12px', overflow: 'hidden', marginBottom: '30px' }}>
             <video
               controls
@@ -107,30 +109,96 @@ export default function PentagonTestPage() {
             </video>
           </div>
 
-          {/* ALL SCENE VIDEOS */}
-          <h3 style={{ fontSize: '20px', marginBottom: '15px' }}>🎞️ All Scenes ({result.pollinations.length})</h3>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '20px' }}>
-            {result.pollinations.map((render: any, idx: number) => (
-              <div key={idx} style={{ background: '#f9f9f9', borderRadius: '8px', padding: '15px' }}>
-                <div style={{ fontSize: '14px', color: '#666', marginBottom: '10px' }}>
-                  Scene: {render.sceneId}
-                </div>
-                <video
-                  controls
-                  style={{ width: '100%', borderRadius: '6px' }}
-                  src={render.videoUrl}
-                />
-                <a
-                  href={render.videoUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={{ fontSize: '12px', color: '#3b82f6', display: 'block', marginTop: '10px' }}
-                >
-                  Open in new tab →
-                </a>
+          {/* GEORGIAN VOICEOVERS */}
+          {result.voiceovers?.voiceovers && result.voiceovers.voiceovers.length > 0 && (
+            <div style={{ marginBottom: '30px' }}>
+              <h3 style={{ fontSize: '20px', marginBottom: '15px' }}>🎤 Georgian Voiceovers ({result.voiceovers.voiceovers.length})</h3>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '15px' }}>
+                {result.voiceovers.voiceovers.map((vo: any, idx: number) => (
+                  <div key={idx} style={{ background: '#f0f9ff', borderRadius: '8px', padding: '15px' }}>
+                    <div style={{ fontSize: '14px', fontWeight: 'bold', marginBottom: '8px' }}>
+                      {vo.sceneId}
+                    </div>
+                    <div style={{ fontSize: '13px', color: '#444', marginBottom: '10px', fontStyle: 'italic' }}>
+                      "{vo.text}"
+                    </div>
+                    {vo.audioUrl && (
+                      <audio controls style={{ width: '100%' }} src={vo.audioUrl}>
+                        Your browser does not support audio.
+                      </audio>
+                    )}
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            </div>
+          )}
+
+          {/* ALL SCENE VIDEOS */}
+          {result.videos && result.videos.length > 0 && (
+            <div style={{ marginBottom: '30px' }}>
+              <h3 style={{ fontSize: '20px', marginBottom: '15px' }}>🎞️ All Scenes ({result.videos.length})</h3>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '20px' }}>
+                {result.videos.map((render: any, idx: number) => (
+                  <div key={idx} style={{ background: '#f9f9f9', borderRadius: '8px', padding: '15px' }}>
+                    <div style={{ fontSize: '14px', color: '#666', marginBottom: '10px' }}>
+                      Scene: {render.sceneId}
+                    </div>
+                    <video
+                      controls
+                      style={{ width: '100%', borderRadius: '6px' }}
+                      src={render.videoUrl}
+                    />
+                    <a
+                      href={render.videoUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ fontSize: '12px', color: '#3b82f6', display: 'block', marginTop: '10px' }}
+                    >
+                      Open in new tab →
+                    </a>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* LOCALIZED TEXT */}
+          {result.localized && (
+            <div style={{ marginBottom: '30px' }}>
+              <h3 style={{ fontSize: '20px', marginBottom: '15px' }}>🇬🇪 Georgian Translation</h3>
+              <div style={{ background: '#fef3c7', padding: '20px', borderRadius: '8px' }}>
+                <div style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '10px' }}>
+                  {result.localized.title_ka}
+                </div>
+                <div style={{ fontSize: '14px', color: '#666' }}>
+                  {result.localized.logline_ka}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* PIPELINE TIMINGS */}
+          {result.meta?.stageTimingsMs && (
+            <div style={{ marginBottom: '30px' }}>
+              <h3 style={{ fontSize: '20px', marginBottom: '15px' }}>⏱️ Pipeline Performance</h3>
+              <div style={{ background: '#f5f5f5', padding: '20px', borderRadius: '8px' }}>
+                {Object.entries(result.meta.stageTimingsMs).map(([stage, ms]: [string, any]) => (
+                  <div key={stage} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                    <span style={{ fontSize: '14px' }}>{stage}</span>
+                    <span style={{ fontSize: '14px', fontWeight: 'bold', color: '#3b82f6' }}>
+                      {(ms / 1000).toFixed(2)}s
+                    </span>
+                  </div>
+                ))}
+                <div style={{ borderTop: '2px solid #ddd', marginTop: '10px', paddingTop: '10px', display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ fontSize: '16px', fontWeight: 'bold' }}>Total Time</span>
+                  <span style={{ fontSize: '16px', fontWeight: 'bold', color: '#8b5cf6' }}>
+                    {(Object.values(result.meta.stageTimingsMs).reduce((a: any, b: any) => a + b, 0) / 1000).toFixed(2)}s
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* DEBUG INFO */}
           <details style={{ marginTop: '30px' }}>
@@ -152,4 +220,4 @@ export default function PentagonTestPage() {
       )}
     </div>
   );
-}
+          }
