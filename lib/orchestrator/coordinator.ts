@@ -1,4 +1,3 @@
-```typescript
 // coordinator.ts
 // Pentagon Pipeline: DeepSeek → GPT → Gemini → Grok → Pollinations
 // Production orchestrator for AI video generation with 5-stage processing
@@ -779,4 +778,3 @@ export async function runPentagonPipeline(input: PentagonInput): Promise<Pentago
     },
   };
 }
-```
