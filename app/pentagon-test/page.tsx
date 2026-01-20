@@ -97,17 +97,19 @@ export default function PentagonTestPage() {
           <h2 style={{ fontSize: '24px', marginBottom: '20px' }}>✅ Video Generated!</h2>
 
           {/* MAIN VIDEO */}
-          <div style={{ background: '#000', borderRadius: '12px', overflow: 'hidden', marginBottom: '30px' }}>
-            <video
-              controls
-              autoPlay
-              loop
-              style={{ width: '100%', display: 'block' }}
-              src={result.finalVideoUrl}
-            >
-              Your browser does not support video playback.
-            </video>
-          </div>
+          {result.finalVideoUrl && (
+            <div style={{ background: '#000', borderRadius: '12px', overflow: 'hidden', marginBottom: '30px' }}>
+              <video
+                controls
+                autoPlay
+                loop
+                style={{ width: '100%', display: 'block' }}
+                src={result.finalVideoUrl}
+              >
+                Your browser does not support video playback.
+              </video>
+            </div>
+          )}
 
           {/* GEORGIAN VOICEOVERS */}
           {result.voiceovers?.voiceovers && result.voiceovers.voiceovers.length > 0 && (
@@ -220,4 +222,4 @@ export default function PentagonTestPage() {
       )}
     </div>
   );
-          }
+            }
