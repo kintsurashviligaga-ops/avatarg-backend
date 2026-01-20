@@ -1,6 +1,6 @@
 // lib/orchestrator/coordinator.ts
 // AI Pentagon Pipeline: Gemini 1.5 Flash → GPT-4o → Gemini → Grok → Pollinations
-// Using v1beta API for latest Gemini models
+// Production-ready with v1beta API and gemini-1.5-flash-latest
 
 export type PipelineStage =
   | "deepseek_structure"
@@ -158,7 +158,7 @@ function loadEnvConfig(): EnvConfig {
     gemini: {
       apiKey: getEnvVar("GEMINI_API_KEY"),
       baseUrl: "https://generativelanguage.googleapis.com/v1beta",
-      model: "gemini-1.5-flash",
+      model: "gemini-1.5-flash-latest",
     },
     xai: {
       apiKey: getEnvVar("XAI_API_KEY"),
