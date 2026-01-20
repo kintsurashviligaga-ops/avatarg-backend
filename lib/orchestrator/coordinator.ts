@@ -1,27 +1,29 @@
 export class ProductionCoordinator {
-  // ეს არის მთავარი ფუნქცია, რომელსაც API იძახებს
   async orchestrate({ userId, userPrompt, brandContext }: any) {
-    console.log(`[Coordinator] Starting production for user: ${userId}`);
+    console.log(`[Coordinator] Generating script with Grok...`);
     
-    // ჯერ ვქმნით სცენარს Grok-ის გამოყენებით
+    // 1. Grok წერს სცენარს
     const script = await this.generateVideoScript(userPrompt);
     
-    // აქ იქმნება Job-ის ობიექტი (მაგალითისთვის)
+    // 2. ვქმნით სურათების ლინკებს Pollinations-ით (Grok-ის აღწერების საფუძველზე)
+    // ჩვენს შემთხვევაში ავიღოთ 4 სცენა
+    const scenes = [1, 2, 3, 4].map(i => ({
+      sceneNumber: i,
+      // Pollinations-ის ფორმატი: https://image.pollinations.ai/prompt/[პრომპტი]
+      imageUrl: `https://image.pollinations.ai/prompt/${encodeURIComponent(userPrompt + ' scene ' + i)}?width=1024&height=1024&nologo=true`
+    }));
+
     return {
       id: `job_${Date.now()}`,
       status: 'processing',
-      script: script
+      script: script,
+      visuals: scenes // ეს ლინკები გადაეცემა Shotstack-ს
     };
   }
 
-  // შენი Grok-ის ფუნქცია ახლა უკვე კლასის შიგნითაა
   async generateVideoScript(userPrompt: string) {
     const apiKey = process.env.XAI_API_KEY;
-    
-    if (!apiKey) {
-      console.log("XAI_API_KEY missing, using fallback");
-      return "Default script: A horse and a squirrel playing.";
-    }
+    if (!apiKey) return "Grok API key missing.";
 
     try {
       const response = await fetch('https://api.x.ai/v1/chat/completions', {
@@ -33,29 +35,19 @@ export class ProductionCoordinator {
         body: JSON.stringify({
           model: 'grok-beta',
           messages: [
-            { 
-              role: 'system', 
-              content: 'შენ ხარ ვიდეო სცენარისტი. შექმენი 4 სცენისგან შემდგარი სცენარი. თითოეულ სცენას მიეცი ინგლისური ვიზუალური აღწერა (image prompt).' 
-            },
+            { role: 'system', content: 'You are a video producer. Provide a short 4-scene script based on the prompt.' },
             { role: 'user', content: userPrompt }
           ]
         })
       });
-
       const data = await response.json();
       return data.choices[0].message.content;
     } catch (error) {
-      console.error("Grok Error:", error);
-      return "Fallback script due to error";
+      return "Fallback script: " + userPrompt;
     }
   }
 
-  // დამხმარე ფუნქცია სტატუსისთვის
   async getJobStatus(jobId: string) {
-    return {
-      id: jobId,
-      status: 'completed',
-      videoUrl: 'https://example.com/video.mp4'
-    };
+    return { id: jobId, status: 'completed' };
   }
 }
