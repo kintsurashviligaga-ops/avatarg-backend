@@ -1,14 +1,3 @@
-# ❌ Grok Model Deprecated - გასაახლებელია
-
-**Grok Beta** დეპრეკირებულია და ახლა **Grok 3** უნდა გამოვიყენოთ.
-
----
-
-## 🔧 განახლებული `lib/orchestrator/coordinator.ts`
-
-მხოლოდ ერთი ხაზი უნდა შეიცვალოს:
-
-```typescript
 // lib/orchestrator/coordinator.ts
 // ... (ყველა კოდი იგივე რჩება)
 
@@ -950,33 +939,3 @@ export async function runPentagonPipeline(input: PentagonInput): Promise<Pentago
     },
   };
 }
-```
-
-</details>
-
----
-
-## 🚀 DEPLOY
-
-```bash
-git add lib/orchestrator/coordinator.ts
-git commit -m "fix: upgrade from grok-beta to grok-3"
-git push origin main
-```
-
----
-
-## ✅ რა შეიცვალა:
-
-**ერთი ხაზი:**
-```typescript
-// Before:
-model: "grok-beta",
-
-// After:
-model: "grok-3",
-```
-
----
-
-**Deploy და კიდევ სცადე!** 🚀✨
