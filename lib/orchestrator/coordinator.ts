@@ -1,5 +1,79 @@
+# ❌ Grok Model Deprecated - გასაახლებელია
+
+**Grok Beta** დეპრეკირებულია და ახლა **Grok 3** უნდა გამოვიყენოთ.
+
+---
+
+## 🔧 განახლებული `lib/orchestrator/coordinator.ts`
+
+მხოლოდ ერთი ხაზი უნდა შეიცვალოს:
+
+```typescript
 // lib/orchestrator/coordinator.ts
-// AI Pentagon Pipeline: GPT-4o → GPT-4o → GPT-4o → ElevenLabs → Grok → Pollinations
+// ... (ყველა კოდი იგივე რჩება)
+
+function loadEnvConfig(): EnvConfig {
+  const required: string[] = [
+    "OPENAI_API_KEY",
+    "ELEVENLABS_API_KEY",
+    "XAI_API_KEY",
+  ];
+
+  const missing: string[] = [];
+  for (let i = 0; i < required.length; i = i + 1) {
+    const key = required[i];
+    if (!getEnvVar(key)) {
+      missing.push(key);
+    }
+  }
+
+  if (missing.length > 0) {
+    const errorMessage = "Missing required environment variables: " + missing.join(", ");
+    throw new PipelineError({
+      stage: "structure_generation",
+      code: "BAD_REQUEST",
+      message: errorMessage,
+      retryable: false,
+    });
+  }
+
+  return {
+    openai: {
+      apiKey: getEnvVar("OPENAI_API_KEY"),
+      baseUrl: "https://api.openai.com/v1",
+      model: "gpt-4o-mini",
+    },
+    elevenlabs: {
+      apiKey: getEnvVar("ELEVENLABS_API_KEY"),
+      baseUrl: "https://api.elevenlabs.io/v1",
+      voiceId: getEnvVar("ELEVENLABS_VOICE_ID") || "pNInz6obpgDQGcFmaJgB",
+    },
+    xai: {
+      apiKey: getEnvVar("XAI_API_KEY"),
+      baseUrl: "https://api.x.ai/v1",
+      model: "grok-3",  // ✅ CHANGED FROM "grok-beta"
+    },
+    pollinations: {
+      baseUrl: "https://image.pollinations.ai",
+      videoBaseUrl: "https://image.pollinations.ai/prompt",
+    },
+    defaultTimeoutMs: parseInt(getEnvVar("DEFAULT_TIMEOUT_MS") || "30000", 10),
+  };
+}
+
+// ... (დანარჩენი კოდი იგივე რჩება)
+```
+
+---
+
+## 📝 ALTERNATIVE: სრული განახლებული ფაილი (თუ გინდა მთლიანად ჩაანაცვლო)
+
+<details>
+<summary>👉 დააჭირე სრული coordinator.ts-ის სანახავად</summary>
+
+```typescript
+// lib/orchestrator/coordinator.ts
+// AI Pentagon Pipeline: GPT-4o → GPT-4o → GPT-4o → ElevenLabs → Grok 3 → Pollinations
 // Production-ready with Georgian voiceover support via ElevenLabs
 
 export type PipelineStage =
@@ -174,7 +248,7 @@ function loadEnvConfig(): EnvConfig {
     xai: {
       apiKey: getEnvVar("XAI_API_KEY"),
       baseUrl: "https://api.x.ai/v1",
-      model: "grok-beta",
+      model: "grok-3",
     },
     pollinations: {
       baseUrl: "https://image.pollinations.ai",
@@ -876,3 +950,33 @@ export async function runPentagonPipeline(input: PentagonInput): Promise<Pentago
     },
   };
 }
+```
+
+</details>
+
+---
+
+## 🚀 DEPLOY
+
+```bash
+git add lib/orchestrator/coordinator.ts
+git commit -m "fix: upgrade from grok-beta to grok-3"
+git push origin main
+```
+
+---
+
+## ✅ რა შეიცვალა:
+
+**ერთი ხაზი:**
+```typescript
+// Before:
+model: "grok-beta",
+
+// After:
+model: "grok-3",
+```
+
+---
+
+**Deploy და კიდევ სცადე!** 🚀✨
