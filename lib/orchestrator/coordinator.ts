@@ -130,14 +130,8 @@ function getEnvVar(key: string): string {
 }
 
 function loadEnvConfig(): EnvConfig {
-  // Match EXACT env var keys requested by user:
-  const required: string[] = [
-    "OPENAI_API_KEY",
-    "ELEVENLABS_API_KEY",
-    "ELEVENLABS_VOICE_ID",
-    "GOOGLE_TTS_API_KEY",
-    "PEXELS_API_KEY",
-  ];
+  // ✅ UPDATED: ElevenLabs envs are OPTIONAL now (Google TTS is primary).
+  const required: string[] = ["OPENAI_API_KEY", "GOOGLE_TTS_API_KEY", "PEXELS_API_KEY"];
 
   const missing: string[] = [];
   for (let i = 0; i < required.length; i = i + 1) {
@@ -160,10 +154,11 @@ function loadEnvConfig(): EnvConfig {
       baseUrl: "https://api.openai.com/v1",
       model: "gpt-4o-mini",
     },
+    // ✅ ElevenLabs optional (kept for future fallback; NOT required)
     elevenlabs: {
-      apiKey: getEnvVar("ELEVENLABS_API_KEY"),
+      apiKey: getEnvVar("ELEVENLABS_API_KEY") || "",
       baseUrl: "https://api.elevenlabs.io/v1",
-      voiceId: getEnvVar("ELEVENLABS_VOICE_ID"),
+      voiceId: getEnvVar("ELEVENLABS_VOICE_ID") || "",
       sfxApiKey: getEnvVar("ELEVENLABS_SOUND_EFFECTS_API_KEY") || "",
     },
     googleTts: {
@@ -350,7 +345,6 @@ function normalizeStructure(structure: any, input: PentagonInput): VideoStructur
 
   if (scenesSafe.length === 0) return safeFallbackStructure(input);
 
-  // Enforce total duration cap
   let total = 0;
   for (let i = 0; i < scenesSafe.length; i++) total += scenesSafe[i].durationSec;
   if (total > maxDuration) {
@@ -636,6 +630,16 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 }
 
 async function elevenLabsTTS(text: string, config: EnvConfig): Promise<string> {
+  // Optional helper (not used by default)
+  if (!isNonEmptyString(config.elevenlabs.apiKey) || !isNonEmptyString(config.elevenlabs.voiceId)) {
+    throw new PipelineError({
+      stage: "voiceover_generation",
+      code: "BAD_REQUEST",
+      message: "ElevenLabs is not configured (missing ELEVENLABS_API_KEY or ELEVENLABS_VOICE_ID).",
+      retryable: false,
+    });
+  }
+
   const url = `${config.elevenlabs.baseUrl}/text-to-speech/${encodeURIComponent(
     config.elevenlabs.voiceId
   )}?output_format=mp3_44100_128`;
@@ -719,32 +723,29 @@ type LocalizedSceneKA = LocalizedStructureKA["scenes_ka"][number];
 async function stageVoiceover(localized: LocalizedStructureKA, config: EnvConfig): Promise<VoiceoverPack> {
   // ✅ FIX: explicit narrowing + explicit element type avoids `never[]`
   const scenes: LocalizedSceneKA[] = Array.isArray(localized?.scenes_ka) ? localized.scenes_ka : [];
-
   const voiceovers: VoiceoverPack["voiceovers"] = [];
 
   for (let i = 0; i < scenes.length; i = i + 1) {
     const scene = scenes[i];
 
-    const text = (scene.narration_ka ?? scene.action_ka ?? scene.beat_ka ?? "").toString().trim();
+    const text = (scene?.narration_ka ?? scene?.action_ka ?? scene?.beat_ka ?? "").toString().trim();
 
     if (!isNonEmptyString(text) || text.length < 4) {
-      voiceovers.push({ sceneId: scene.id || `scene_${i + 1}`, text: "", audioUrl: "", provider: "none" });
+      voiceovers.push({ sceneId: scene?.id || `scene_${i + 1}`, text: "", audioUrl: "", provider: "none" });
       continue;
     }
 
+    // ✅ PRIMARY: Google TTS (fast, reliable). No ElevenLabs delay.
     try {
-      const audioUrl = await elevenLabsTTS(text, config);
-      voiceovers.push({ sceneId: scene.id, text, audioUrl, provider: "elevenlabs" });
+      const audioUrl = await googleTTS(text, config);
+      voiceovers.push({ sceneId: scene.id, text, audioUrl, provider: "google_tts" });
     } catch {
-      try {
-        const audioUrl = await googleTTS(text, config);
-        voiceovers.push({ sceneId: scene.id, text, audioUrl, provider: "google_tts" });
-      } catch {
-        voiceovers.push({ sceneId: scene.id, text, audioUrl: "", provider: "none" });
-      }
+      // Optional: you can enable ElevenLabs fallback later if you want.
+      // For now, keep pipeline alive even if TTS fails.
+      voiceovers.push({ sceneId: scene.id, text, audioUrl: "", provider: "none" });
     }
 
-    await sleep(200);
+    await sleep(150);
   }
 
   return { voiceovers };
@@ -885,4 +886,4 @@ export async function runPentagonPipeline(input: PentagonInput): Promise<Pentago
       stageTimingsMs: timings,
     },
   };
-        }
+         }
