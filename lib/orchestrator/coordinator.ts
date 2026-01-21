@@ -55,7 +55,7 @@ export interface VoiceoverPack {
   voiceovers: Array<{
     sceneId: string;
     text: string;
-    audioUrl: string; // data:audio/mpeg;base64,... (ElevenLabs primary; Google TTS fallback)
+    audioUrl: string; // data:audio/mpeg;base64,...
     provider: "elevenlabs" | "google_tts" | "none";
   }>;
 }
@@ -336,7 +336,7 @@ function normalizeStructure(structure: any, input: PentagonInput): VideoStructur
 
   const scenesRaw = ensureArray<any>(structure?.scenes, []);
   const scenesSafe = scenesRaw
-    .filter((s) => s && isNonEmptyString(s.id))
+    .filter((s) => s && (isNonEmptyString(s.id) || isNonEmptyString(s.beat) || isNonEmptyString(s.action)))
     .slice(0, maxScenes)
     .map((s, idx) => ({
       id: isNonEmptyString(s.id) ? s.id : `scene_${idx + 1}`,
@@ -401,7 +401,6 @@ async function stageStructure(input: PentagonInput, config: EnvConfig): Promise<
     ],
     temperature: 0.6,
     max_tokens: 2500,
-    // CRITICAL: force json object mode
     response_format: { type: "json_object" },
   };
 
@@ -420,28 +419,17 @@ async function stageStructure(input: PentagonInput, config: EnvConfig): Promise<
     2
   );
 
-  // Even with response_format, providers can still return empty/odd content.
   const content = response?.choices?.[0]?.message?.content || "";
-
-  // If content is empty, hard fallback (prevents `.map` undefined downstream)
-  if (!isNonEmptyString(content)) {
-    return safeFallbackStructure(input);
-  }
+  if (!isNonEmptyString(content)) return safeFallbackStructure(input);
 
   let parsed: any;
   try {
     parsed = JSON.parse(cleanJsonString(content));
-  } catch (err) {
-    // In case model returns already-parsed object (rare), attempt to use raw message
+  } catch {
     parsed = null;
   }
 
-  // If parse failed, fallback
-  if (!parsed || typeof parsed !== "object") {
-    return safeFallbackStructure(input);
-  }
-
-  // Normalize + enforce invariants
+  if (!parsed || typeof parsed !== "object") return safeFallbackStructure(input);
   return normalizeStructure(parsed, input);
 }
 
@@ -489,14 +477,13 @@ async function stageEdit(structure: VideoStructure, input: PentagonInput, config
 
   const content = response?.choices?.[0]?.message?.content || "";
   if (!isNonEmptyString(content)) {
-    // Safe fallback: treat structure as edited
     return { ...structure, globalNotes: ["Edit stage returned empty output; using original structure."] };
   }
 
   let parsed: any;
   try {
     parsed = JSON.parse(cleanJsonString(content));
-  } catch (error) {
+  } catch {
     return { ...structure, globalNotes: ["Edit stage returned invalid JSON; using original structure."] };
   }
 
@@ -506,13 +493,11 @@ async function stageEdit(structure: VideoStructure, input: PentagonInput, config
     globalNotes: ensureArray<string>(parsed?.globalNotes, []),
   };
 
-  // Enforce scene cap
   if (edited.scenes.length > maxScenes) {
     edited.scenes = edited.scenes.slice(0, maxScenes);
     edited.globalNotes.push(`Truncated to ${maxScenes} scenes.`);
   }
 
-  // Enforce duration cap
   let totalDuration = 0;
   for (let i = 0; i < edited.scenes.length; i++) totalDuration += edited.scenes[i].durationSec;
   if (totalDuration > maxDuration) {
@@ -567,7 +552,6 @@ async function stageLocalize(edited: EditedStructure, config: EnvConfig): Promis
 
   const content = response?.choices?.[0]?.message?.content || "";
   if (!isNonEmptyString(content)) {
-    // Fallback minimal localization
     return {
       title_ka: "უსათაურო",
       logline_ka: "",
@@ -594,8 +578,7 @@ async function stageLocalize(edited: EditedStructure, config: EnvConfig): Promis
   const scenes_ka_safe =
     scenes_ka_raw.length > 0
       ? scenes_ka_raw
-      : // If model incorrectly returned scenes, adapt
-        ensureArray<any>(parsed?.scenes, []).map((s: any) => ({
+      : ensureArray<any>(parsed?.scenes, []).map((s: any) => ({
           id: s.id,
           beat_ka: s.beat_ka || s.beat || "",
           camera_ka: s.camera_ka || s.camera || "",
@@ -605,7 +588,6 @@ async function stageLocalize(edited: EditedStructure, config: EnvConfig): Promis
           narration_ka: s.narration_ka || s.action_ka || s.beat_ka || "",
         }));
 
-  // SAFETY CHECK: ensure array before .map()
   const scenesFinal = Array.isArray(scenes_ka_safe)
     ? scenes_ka_safe.map((scene: any) => ({
         id: isNonEmptyString(scene?.id) ? scene.id : "scene_1",
@@ -619,7 +601,6 @@ async function stageLocalize(edited: EditedStructure, config: EnvConfig): Promis
     : [];
 
   if (scenesFinal.length === 0) {
-    // Hard fallback: derive from edited structure
     return {
       title_ka: isNonEmptyString(parsed?.title_ka) ? parsed.title_ka : "უსათაურო",
       logline_ka: isNonEmptyString(parsed?.logline_ka) ? parsed.logline_ka : "",
@@ -651,7 +632,6 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
     const chunk = bytes.subarray(i, i + chunkSize);
     binary += String.fromCharCode(...chunk);
   }
-  // btoa exists in Edge runtime
   return btoa(binary);
 }
 
@@ -733,25 +713,29 @@ async function googleTTS(text: string, config: EnvConfig): Promise<string> {
   return `data:audio/mpeg;base64,${audioContent}`;
 }
 
+// ✅ FIX: prevent TypeScript "never" by explicitly typing the scene type.
+type LocalizedSceneKA = LocalizedStructureKA["scenes_ka"][number];
+
 async function stageVoiceover(localized: LocalizedStructureKA, config: EnvConfig): Promise<VoiceoverPack> {
-  const scenes = ensureArray(localized?.scenes_ka, []);
+  // ✅ FIX: explicit narrowing + explicit element type avoids `never[]`
+  const scenes: LocalizedSceneKA[] = Array.isArray(localized?.scenes_ka) ? localized.scenes_ka : [];
+
   const voiceovers: VoiceoverPack["voiceovers"] = [];
 
-  // SAFETY CHECK: ensure array before loop/map usage
   for (let i = 0; i < scenes.length; i = i + 1) {
     const scene = scenes[i];
-    const text = (scene?.narration_ka || scene?.action_ka || scene?.beat_ka || "").trim();
+
+    const text = (scene.narration_ka ?? scene.action_ka ?? scene.beat_ka ?? "").toString().trim();
 
     if (!isNonEmptyString(text) || text.length < 4) {
-      voiceovers.push({ sceneId: scene?.id || `scene_${i + 1}`, text: "", audioUrl: "", provider: "none" });
+      voiceovers.push({ sceneId: scene.id || `scene_${i + 1}`, text: "", audioUrl: "", provider: "none" });
       continue;
     }
 
-    // Primary: ElevenLabs; Fallback: Google TTS ka-GE-Standard-A
     try {
       const audioUrl = await elevenLabsTTS(text, config);
       voiceovers.push({ sceneId: scene.id, text, audioUrl, provider: "elevenlabs" });
-    } catch (err: any) {
+    } catch {
       try {
         const audioUrl = await googleTTS(text, config);
         voiceovers.push({ sceneId: scene.id, text, audioUrl, provider: "google_tts" });
@@ -767,10 +751,9 @@ async function stageVoiceover(localized: LocalizedStructureKA, config: EnvConfig
 }
 
 async function stageVisualPromptsFromActions(edited: EditedStructure): Promise<VisualPromptPack> {
-  const scenes = ensureArray(edited?.scenes, []);
+  const scenes = ensureArray<EditedStructure["scenes"][number]>(edited?.scenes, []);
   const shots = scenes.map((s) => ({
     sceneId: s.id,
-    // Use action field directly (requested): practical keywords for Pexels search.
     prompt: (s.action || s.beat || "").toString().slice(0, 160).trim() || "cinematic scene",
   }));
   return { shots };
@@ -778,6 +761,7 @@ async function stageVisualPromptsFromActions(edited: EditedStructure): Promise<V
 
 async function pexelsSearchOneVideo(query: string, config: EnvConfig): Promise<{ imageUrl: string; videoUrl: string }> {
   const searchUrl = `${config.pexels.baseUrl}/search?query=${encodeURIComponent(query)}&per_page=1&orientation=portrait`;
+
   const response = await fetchWithTimeout(
     searchUrl,
     {
@@ -809,7 +793,6 @@ async function pexelsSearchOneVideo(query: string, config: EnvConfig): Promise<{
   const imageUrl = isNonEmptyString(v?.image) ? v.image : "";
 
   const files = ensureArray<any>(v?.video_files, []);
-  // prefer higher res if available
   const preferred =
     files.find((f) => f?.quality === "hd" && typeof f?.width === "number" && f.width >= 720) ||
     files.find((f) => f?.quality === "hd") ||
@@ -820,13 +803,13 @@ async function pexelsSearchOneVideo(query: string, config: EnvConfig): Promise<{
 }
 
 async function stageVideoRender(prompts: VisualPromptPack, config: EnvConfig): Promise<VideoRender[]> {
-  const shots = ensureArray(prompts?.shots, []);
+  const shots = ensureArray<VisualPromptPack["shots"][number]>(prompts?.shots, []);
   const renders: VideoRender[] = [];
 
-  // SAFETY CHECK: ensure array before loop/map usage
   for (let i = 0; i < shots.length; i = i + 1) {
     const shot = shots[i];
     const query = (shot?.prompt || "").trim();
+
     if (!isNonEmptyString(query)) {
       renders.push({ sceneId: shot?.sceneId || `scene_${i + 1}`, imageUrl: "", videoUrl: "" });
       continue;
@@ -902,4 +885,4 @@ export async function runPentagonPipeline(input: PentagonInput): Promise<Pentago
       stageTimingsMs: timings,
     },
   };
-}
+        }
