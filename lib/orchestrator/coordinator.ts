@@ -1,4 +1,3 @@
-```typescript
 export type PipelineStage =
   | "structure_generation"
   | "gpt_edit"
@@ -904,4 +903,3 @@ export async function runPentagonPipeline(input: PentagonInput): Promise<Pentago
     },
   };
 }
-```
