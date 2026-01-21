@@ -130,7 +130,7 @@ function getEnvVar(key: string): string {
 }
 
 function loadEnvConfig(): EnvConfig {
-  // ✅ UPDATED: ElevenLabs envs are OPTIONAL now (Google TTS is primary).
+  // ✅ Google TTS is primary; ElevenLabs is OPTIONAL
   const required: string[] = ["OPENAI_API_KEY", "GOOGLE_TTS_API_KEY", "PEXELS_API_KEY"];
 
   const missing: string[] = [];
@@ -154,7 +154,6 @@ function loadEnvConfig(): EnvConfig {
       baseUrl: "https://api.openai.com/v1",
       model: "gpt-4o-mini",
     },
-    // ✅ ElevenLabs optional (kept for future fallback; NOT required)
     elevenlabs: {
       apiKey: getEnvVar("ELEVENLABS_API_KEY") || "",
       baseUrl: "https://api.elevenlabs.io/v1",
@@ -513,6 +512,7 @@ async function stageLocalize(edited: EditedStructure, config: EnvConfig): Promis
     "You must produce:",
     "- title_ka (Georgian)",
     "- logline_ka (Georgian)",
+    "- IMPORTANT: Use ONLY Georgian letters. No Latin words.",
     '- scenes_ka: array with same scene IDs, each with beat_ka, camera_ka, setting_ka, characters_ka, action_ka',
     "- narration_ka: 2-3 sentence Georgian narration for voiceover per scene.",
     "Use native Georgian script only.",
@@ -630,7 +630,6 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 }
 
 async function elevenLabsTTS(text: string, config: EnvConfig): Promise<string> {
-  // Optional helper (not used by default)
   if (!isNonEmptyString(config.elevenlabs.apiKey) || !isNonEmptyString(config.elevenlabs.voiceId)) {
     throw new PipelineError({
       stage: "voiceover_generation",
@@ -717,12 +716,27 @@ async function googleTTS(text: string, config: EnvConfig): Promise<string> {
   return `data:audio/mpeg;base64,${audioContent}`;
 }
 
-// ✅ FIX: prevent TypeScript "never" by explicitly typing the scene type.
+// ✅ FIX: prevent TypeScript "never"
 type LocalizedSceneKA = LocalizedStructureKA["scenes_ka"][number];
 
 async function stageVoiceover(localized: LocalizedStructureKA, config: EnvConfig): Promise<VoiceoverPack> {
-  // ✅ FIX: explicit narrowing + explicit element type avoids `never[]`
-  const scenes: LocalizedSceneKA[] = Array.isArray(localized?.scenes_ka) ? localized.scenes_ka : [];
+  // ✅ Always have at least one scene to voice (prevents 0.00s + empty output)
+  const scenesRaw = Array.isArray(localized?.scenes_ka) ? localized.scenes_ka : [];
+  const scenes: LocalizedSceneKA[] =
+    scenesRaw.length > 0
+      ? scenesRaw
+      : [
+          {
+            id: "scene_1",
+            beat_ka: localized?.title_ka || "",
+            camera_ka: "",
+            setting_ka: "",
+            characters_ka: [],
+            action_ka: localized?.logline_ka || "",
+            narration_ka: `${localized?.title_ka || ""}. ${localized?.logline_ka || ""}`.trim(),
+          },
+        ];
+
   const voiceovers: VoiceoverPack["voiceovers"] = [];
 
   for (let i = 0; i < scenes.length; i = i + 1) {
@@ -735,14 +749,18 @@ async function stageVoiceover(localized: LocalizedStructureKA, config: EnvConfig
       continue;
     }
 
-    // ✅ PRIMARY: Google TTS (fast, reliable). No ElevenLabs delay.
+    // ✅ PRIMARY: Google TTS
     try {
       const audioUrl = await googleTTS(text, config);
       voiceovers.push({ sceneId: scene.id, text, audioUrl, provider: "google_tts" });
-    } catch {
-      // Optional: you can enable ElevenLabs fallback later if you want.
-      // For now, keep pipeline alive even if TTS fails.
-      voiceovers.push({ sceneId: scene.id, text, audioUrl: "", provider: "none" });
+    } catch (err) {
+      // ✅ OPTIONAL fallback: ElevenLabs (only if configured)
+      try {
+        const audioUrl = await elevenLabsTTS(text, config);
+        voiceovers.push({ sceneId: scene.id, text, audioUrl, provider: "elevenlabs" });
+      } catch {
+        voiceovers.push({ sceneId: scene.id, text, audioUrl: "", provider: "none" });
+      }
     }
 
     await sleep(150);
@@ -886,4 +904,4 @@ export async function runPentagonPipeline(input: PentagonInput): Promise<Pentago
       stageTimingsMs: timings,
     },
   };
-         }
+}
