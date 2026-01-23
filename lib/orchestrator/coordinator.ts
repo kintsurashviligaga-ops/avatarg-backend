@@ -55,7 +55,7 @@ export interface VoiceoverPack {
   voiceovers: Array<{
     sceneId: string;
     text: string;
-    audioUrl: string; // data:audio/mpeg;base64,...
+    audioUrl: string; // data:audio/mpeg;base64,... OR https://...
     provider: "elevenlabs" | "google_tts" | "none";
   }>;
 }
@@ -82,6 +82,10 @@ export interface PentagonOutput {
   visualPrompts: VisualPromptPack;
   videos: VideoRender[];
   finalVideoUrl: string;
+
+  // ✅ NEW: used by frontend polling
+  renderJobId?: string;
+
   meta: {
     startedAt: string;
     finishedAt: string;
@@ -122,6 +126,15 @@ interface EnvConfig {
   elevenlabs: { apiKey: string; baseUrl: string; voiceId: string; sfxApiKey: string };
   googleTts: { apiKey: string; baseUrl: string; voiceName: string; languageCode: string };
   pexels: { apiKey: string; baseUrl: string };
+  supabase: {
+    url: string;
+    serviceRoleKey: string;
+    renderJobsTable: string;
+    // Optional: if set, we upload voiceover mp3s here and store URL in DB (recommended).
+    audioBucket?: string;
+    // if true, make URLs public style; otherwise still works as raw object path URL if bucket is public.
+    publicBaseUrl?: string; // e.g. `${SUPABASE_URL}/storage/v1/object/public`
+  };
   defaultTimeoutMs: number;
 }
 
@@ -130,7 +143,7 @@ function getEnvVar(key: string): string {
 }
 
 function loadEnvConfig(): EnvConfig {
-  // ✅ Google TTS is primary; ElevenLabs is OPTIONAL
+  // ✅ Minimal required
   const required: string[] = ["OPENAI_API_KEY", "GOOGLE_TTS_API_KEY", "PEXELS_API_KEY"];
 
   const missing: string[] = [];
@@ -148,11 +161,15 @@ function loadEnvConfig(): EnvConfig {
     });
   }
 
+  // ✅ Supabase (optional but REQUIRED for "Close the loop" enqueue)
+  const supabaseUrl = getEnvVar("SUPABASE_URL");
+  const supabaseServiceRole = getEnvVar("SUPABASE_SERVICE_ROLE_KEY");
+
   return {
     openai: {
       apiKey: getEnvVar("OPENAI_API_KEY"),
       baseUrl: "https://api.openai.com/v1",
-      model: "gpt-4o-mini",
+      model: getEnvVar("OPENAI_MODEL") || "gpt-4o-mini",
     },
     elevenlabs: {
       apiKey: getEnvVar("ELEVENLABS_API_KEY") || "",
@@ -163,12 +180,19 @@ function loadEnvConfig(): EnvConfig {
     googleTts: {
       apiKey: getEnvVar("GOOGLE_TTS_API_KEY"),
       baseUrl: "https://texttospeech.googleapis.com/v1",
-      voiceName: "ka-GE-Standard-A",
-      languageCode: "ka-GE",
+      voiceName: getEnvVar("GOOGLE_TTS_VOICE_NAME") || "ka-GE-Standard-A",
+      languageCode: getEnvVar("GOOGLE_TTS_LANGUAGE_CODE") || "ka-GE",
     },
     pexels: {
       apiKey: getEnvVar("PEXELS_API_KEY"),
       baseUrl: "https://api.pexels.com/videos",
+    },
+    supabase: {
+      url: supabaseUrl || "",
+      serviceRoleKey: supabaseServiceRole || "",
+      renderJobsTable: getEnvVar("SUPABASE_RENDER_JOBS_TABLE") || "render_jobs",
+      audioBucket: getEnvVar("SUPABASE_AUDIO_BUCKET") || "",
+      publicBaseUrl: supabaseUrl ? `${supabaseUrl}/storage/v1/object/public` : "",
     },
     defaultTimeoutMs: parseInt(getEnvVar("DEFAULT_TIMEOUT_MS") || "30000", 10),
   };
@@ -629,6 +653,15 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
+function base64DataUrlToBytes(dataUrl: string): Uint8Array {
+  const idx = dataUrl.indexOf("base64,");
+  const b64 = idx >= 0 ? dataUrl.slice(idx + "base64,".length) : dataUrl;
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
 async function elevenLabsTTS(text: string, config: EnvConfig): Promise<string> {
   if (!isNonEmptyString(config.elevenlabs.apiKey) || !isNonEmptyString(config.elevenlabs.voiceId)) {
     throw new PipelineError({
@@ -720,7 +753,6 @@ async function googleTTS(text: string, config: EnvConfig): Promise<string> {
 type LocalizedSceneKA = LocalizedStructureKA["scenes_ka"][number];
 
 async function stageVoiceover(localized: LocalizedStructureKA, config: EnvConfig): Promise<VoiceoverPack> {
-  // ✅ Always have at least one scene to voice (prevents 0.00s + empty output)
   const scenesRaw = Array.isArray(localized?.scenes_ka) ? localized.scenes_ka : [];
   const scenes: LocalizedSceneKA[] =
     scenesRaw.length > 0
@@ -741,7 +773,6 @@ async function stageVoiceover(localized: LocalizedStructureKA, config: EnvConfig
 
   for (let i = 0; i < scenes.length; i = i + 1) {
     const scene = scenes[i];
-
     const text = (scene?.narration_ka ?? scene?.action_ka ?? scene?.beat_ka ?? "").toString().trim();
 
     if (!isNonEmptyString(text) || text.length < 4) {
@@ -847,6 +878,146 @@ async function stageVideoRender(prompts: VisualPromptPack, config: EnvConfig): P
   return renders;
 }
 
+/**
+ * ✅ Optional: upload voiceover mp3 (data URL) to Supabase Storage and return a public URL.
+ * Requires:
+ * - SUPABASE_URL
+ * - SUPABASE_SERVICE_ROLE_KEY
+ * - SUPABASE_AUDIO_BUCKET (bucket must exist; ideally public)
+ */
+async function maybeUploadVoiceoversToSupabaseStorage(
+  requestId: string,
+  voiceovers: VoiceoverPack,
+  config: EnvConfig
+): Promise<VoiceoverPack> {
+  const sb = config.supabase;
+  if (!isNonEmptyString(sb.url) || !isNonEmptyString(sb.serviceRoleKey)) return voiceovers;
+  if (!isNonEmptyString(sb.audioBucket)) return voiceovers;
+
+  const out: VoiceoverPack["voiceovers"] = [];
+
+  for (let i = 0; i < voiceovers.voiceovers.length; i++) {
+    const v = voiceovers.voiceovers[i];
+    const audioUrl = v.audioUrl || "";
+
+    // only upload if data URL base64
+    if (!audioUrl.startsWith("data:audio/") || audioUrl.indexOf("base64,") === -1) {
+      out.push(v);
+      continue;
+    }
+
+    try {
+      const bytes = base64DataUrlToBytes(audioUrl);
+      const objectPath = `voiceovers/${encodeURIComponent(requestId)}/${encodeURIComponent(v.sceneId)}.mp3`;
+      const putUrl = `${sb.url}/storage/v1/object/${encodeURIComponent(sb.audioBucket)}/${objectPath}`;
+
+      const resp = await fetchWithTimeout(
+        putUrl,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${sb.serviceRoleKey}`,
+            apikey: sb.serviceRoleKey,
+            "Content-Type": "audio/mpeg",
+            "x-upsert": "true",
+          },
+          body: bytes,
+        },
+        config.defaultTimeoutMs
+      );
+
+      if (!resp.ok) {
+        out.push(v); // fallback to original data url
+        continue;
+      }
+
+      // public URL (bucket should be public for direct playback)
+      const publicUrl = sb.publicBaseUrl
+        ? `${sb.publicBaseUrl}/${encodeURIComponent(sb.audioBucket)}/${objectPath}`
+        : `${sb.url}/storage/v1/object/public/${encodeURIComponent(sb.audioBucket)}/${objectPath}`;
+
+      out.push({ ...v, audioUrl: publicUrl });
+    } catch {
+      out.push(v);
+    }
+
+    await sleep(40);
+  }
+
+  return { voiceovers: out };
+}
+
+/**
+ * ✅ Step 1: "Close the loop"
+ * Insert a queued job into Supabase render_jobs with the full payload.
+ *
+ * Required ENV on Vercel:
+ * - SUPABASE_URL
+ * - SUPABASE_SERVICE_ROLE_KEY
+ * - (optional) SUPABASE_RENDER_JOBS_TABLE (default render_jobs)
+ */
+async function enqueueRenderJobToSupabase(args: {
+  requestId: string;
+  payload: any;
+  config: EnvConfig;
+}): Promise<string> {
+  const { requestId, payload, config } = args;
+  const sb = config.supabase;
+
+  if (!isNonEmptyString(sb.url) || !isNonEmptyString(sb.serviceRoleKey)) {
+    throw new PipelineError({
+      stage: "video_rendering",
+      code: "BAD_REQUEST",
+      message:
+        "Supabase enqueue is not configured. Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY on Vercel.",
+      retryable: false,
+    });
+  }
+
+  const table = sb.renderJobsTable || "render_jobs";
+  const url = `${sb.url}/rest/v1/${encodeURIComponent(table)}`;
+
+  // NOTE: Column names assumed: request_id, status, payload, created_at, updated_at
+  // If your schema differs, change keys here to match.
+  const row = {
+    request_id: requestId,
+    status: "queued",
+    payload,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  const resp = await fetchWithTimeout(
+    url,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${sb.serviceRoleKey}`,
+        apikey: sb.serviceRoleKey,
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify(row),
+    },
+    config.defaultTimeoutMs
+  );
+
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => "");
+    throw new PipelineError({
+      stage: "video_rendering",
+      code: "UPSTREAM_ERROR",
+      message: `Failed to enqueue render job in Supabase (HTTP ${resp.status}): ${t}`,
+      retryable: resp.status === 429 || resp.status >= 500,
+    });
+  }
+
+  const data = (await resp.json().catch(() => null)) as any;
+  // With return=representation, Supabase returns array of inserted rows.
+  const id = Array.isArray(data) && data[0] ? (data[0].id || data[0].job_id || "") : "";
+  return isNonEmptyString(id) ? String(id) : "";
+}
+
 export async function runPentagonPipeline(input: PentagonInput): Promise<PentagonOutput> {
   const startedAt = new Date().toISOString();
   const timings: Partial<Record<PipelineStage, number>> = {};
@@ -875,8 +1046,11 @@ export async function runPentagonPipeline(input: PentagonInput): Promise<Pentago
   timings.georgian_localization = Date.now() - t0;
 
   t0 = Date.now();
-  const voiceovers = await stageVoiceover(localized, config);
+  let voiceovers = await stageVoiceover(localized, config);
   timings.voiceover_generation = Date.now() - t0;
+
+  // ✅ recommended: store MP3 in Supabase Storage (avoids huge DB row)
+  voiceovers = await maybeUploadVoiceoversToSupabaseStorage(input.requestId, voiceovers, config);
 
   t0 = Date.now();
   const visualPrompts = await stageVisualPromptsFromActions(edited);
@@ -887,7 +1061,33 @@ export async function runPentagonPipeline(input: PentagonInput): Promise<Pentago
   timings.video_rendering = Date.now() - t0;
 
   const finishedAt = new Date().toISOString();
+
+  // This is just "a first pexels clip url" (NOT final stitched video)
   const finalVideoUrl = videos.find((v) => isNonEmptyString(v.videoUrl))?.videoUrl || "";
+
+  // ✅ Step 1: enqueue job to Supabase (worker will pick it and render final mp4)
+  const payload = {
+    requestId: input.requestId,
+    input,
+    structure,
+    edited,
+    localized,
+    voiceovers,
+    visualPrompts,
+    videos,
+    // worker can use this for logs/debug
+    meta: {
+      startedAt,
+      finishedAt,
+      stageTimingsMs: timings,
+    },
+  };
+
+  const renderJobId = await enqueueRenderJobToSupabase({
+    requestId: input.requestId,
+    payload,
+    config,
+  });
 
   return {
     requestId: input.requestId,
@@ -898,10 +1098,11 @@ export async function runPentagonPipeline(input: PentagonInput): Promise<Pentago
     visualPrompts,
     videos,
     finalVideoUrl,
+    renderJobId,
     meta: {
       startedAt,
       finishedAt,
       stageTimingsMs: timings,
     },
   };
-}
+          }
