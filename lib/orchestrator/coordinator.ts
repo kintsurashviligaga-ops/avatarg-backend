@@ -1,5 +1,5 @@
 // lib/orchestrator/coordinator.ts
-// Vercel Edge Runtime friendly (fetch-only, no Node-only deps).
+// ✅ Vercel Edge Runtime friendly (fetch-only, no Node-only deps).
 
 export type PipelineStage =
   | "structure_generation"
@@ -63,7 +63,7 @@ export interface VoiceoverPack {
 export interface VisualPromptPack {
   shots: Array<{
     sceneId: string;
-    prompt: string; // Pexels search keywords
+    prompt: string; // Pexels keywords (or later: image gen prompt)
   }>;
 }
 
@@ -81,9 +81,12 @@ export interface PentagonOutput {
   voiceovers: VoiceoverPack;
   visualPrompts: VisualPromptPack;
   videos: VideoRender[];
+
+  // NOTE: This is NOT the final stitched video.
+  // It's a "first available clip" fallback, while worker renders final mp4.
   finalVideoUrl: string;
 
-  // ✅ NEW: used by frontend polling
+  // ✅ NEW: Supabase render job id for frontend polling
   renderJobId?: string;
 
   meta: {
@@ -130,38 +133,43 @@ interface EnvConfig {
     url: string;
     serviceRoleKey: string;
     renderJobsTable: string;
-    // Optional: if set, we upload voiceover mp3s here and store URL in DB (recommended).
     audioBucket?: string;
-    // if true, make URLs public style; otherwise still works as raw object path URL if bucket is public.
-    publicBaseUrl?: string; // e.g. `${SUPABASE_URL}/storage/v1/object/public`
+    publicBaseUrl?: string; // `${SUPABASE_URL}/storage/v1/object/public`
   };
   defaultTimeoutMs: number;
 }
 
+/* -------------------------- ENV HELPERS -------------------------- */
+
 function getEnvVar(key: string): string {
-  return (process.env as any)?.[key] || "";
+  const v = (process.env as any)?.[key];
+  return typeof v === "string" ? v.trim() : "";
 }
 
-function loadEnvConfig(): EnvConfig {
-  // ✅ Minimal required
-  const required: string[] = ["OPENAI_API_KEY", "GOOGLE_TTS_API_KEY", "PEXELS_API_KEY"];
-
-  const missing: string[] = [];
-  for (let i = 0; i < required.length; i = i + 1) {
-    const k = required[i];
-    if (!getEnvVar(k)) missing.push(k);
-  }
-
-  if (missing.length > 0) {
+function mustEnv(stage: PipelineStage, key: string): string {
+  const v = getEnvVar(key);
+  if (!v) {
     throw new PipelineError({
-      stage: "structure_generation",
+      stage,
       code: "BAD_REQUEST",
-      message: "Missing required environment variables: " + missing.join(", "),
+      message: `Missing required environment variable: ${key}`,
       retryable: false,
     });
   }
+  return v;
+}
 
-  // ✅ Supabase (optional but REQUIRED for "Close the loop" enqueue)
+function toInt(v: string, fallback: number): number {
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function loadEnvConfig(): EnvConfig {
+  // ✅ Minimal required for this pipeline
+  mustEnv("structure_generation", "OPENAI_API_KEY");
+  mustEnv("voiceover_generation", "GOOGLE_TTS_API_KEY");
+  mustEnv("video_rendering", "PEXELS_API_KEY");
+
   const supabaseUrl = getEnvVar("SUPABASE_URL");
   const supabaseServiceRole = getEnvVar("SUPABASE_SERVICE_ROLE_KEY");
 
@@ -194,9 +202,11 @@ function loadEnvConfig(): EnvConfig {
       audioBucket: getEnvVar("SUPABASE_AUDIO_BUCKET") || "",
       publicBaseUrl: supabaseUrl ? `${supabaseUrl}/storage/v1/object/public` : "",
     },
-    defaultTimeoutMs: parseInt(getEnvVar("DEFAULT_TIMEOUT_MS") || "30000", 10),
+    defaultTimeoutMs: toInt(getEnvVar("DEFAULT_TIMEOUT_MS") || "30000", 30000),
   };
 }
+
+/* -------------------------- FETCH HELPERS -------------------------- */
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -205,10 +215,11 @@ function sleep(ms: number): Promise<void> {
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
-    const response = await fetch(url, { ...init, signal: controller.signal });
+    const resp = await fetch(url, { ...init, signal: controller.signal });
     clearTimeout(timeoutId);
-    return response;
+    return resp;
   } catch (err: any) {
     clearTimeout(timeoutId);
     if (err?.name === "AbortError") throw new Error("TIMEOUT");
@@ -223,76 +234,46 @@ async function requestJson<T>(
   timeoutMs: number,
   maxRetries: number
 ): Promise<T> {
-  let lastError: Error | null = null;
   let attempt = 0;
+  let lastError: Error | null = null;
 
   while (attempt < maxRetries) {
     try {
-      const response = await fetchWithTimeout(url, init, timeoutMs);
+      const resp = await fetchWithTimeout(url, init, timeoutMs);
 
-      if (!response.ok) {
-        const statusCode = response.status;
-        let errorText = "unknown";
-        try {
-          errorText = await response.text();
-        } catch {
-          errorText = "unable to read error";
+      if (!resp.ok) {
+        const status = resp.status;
+        const text = await resp.text().catch(() => "unable to read error");
+
+        if (status === 429) {
+          throw new PipelineError({ stage, code: "RATE_LIMIT", message: `Rate limit: ${text}`, retryable: true });
         }
-
-        if (statusCode === 429) {
-          throw new PipelineError({
-            stage,
-            code: "RATE_LIMIT",
-            message: "Rate limit: " + errorText,
-            retryable: true,
-          });
-        }
-
-        if (statusCode >= 500) {
+        if (status >= 500) {
           throw new PipelineError({
             stage,
             code: "PROVIDER_UNAVAILABLE",
-            message: "Server error " + String(statusCode) + ": " + errorText,
+            message: `Server error ${status}: ${text}`,
             retryable: true,
           });
         }
-
-        throw new PipelineError({
-          stage,
-          code: "UPSTREAM_ERROR",
-          message: "HTTP " + String(statusCode) + ": " + errorText,
-          retryable: false,
-        });
+        throw new PipelineError({ stage, code: "UPSTREAM_ERROR", message: `HTTP ${status}: ${text}`, retryable: false });
       }
 
-      const json = (await response.json()) as T;
-      return json;
-    } catch (error: any) {
-      if (error instanceof PipelineError) {
-        if (!error.retryable) throw error;
-        lastError = error;
-      } else if (error?.message === "TIMEOUT") {
-        lastError = new PipelineError({
-          stage,
-          code: "TIMEOUT",
-          message: "Request timed out",
-          retryable: true,
-          cause: error,
-        });
+      return (await resp.json()) as T;
+    } catch (e: any) {
+      if (e instanceof PipelineError) {
+        if (!e.retryable) throw e;
+        lastError = e;
+      } else if (e?.message === "TIMEOUT") {
+        lastError = new PipelineError({ stage, code: "TIMEOUT", message: "Request timed out", retryable: true, cause: e });
       } else {
-        lastError = new PipelineError({
-          stage,
-          code: "UNKNOWN",
-          message: error?.message || "Unknown error",
-          retryable: false,
-          cause: error,
-        });
+        lastError = new PipelineError({ stage, code: "UNKNOWN", message: e?.message || "Unknown error", retryable: false, cause: e });
       }
 
-      attempt = attempt + 1;
+      attempt += 1;
       if (attempt < maxRetries) {
-        const backoffMs = 400 * Math.pow(2.5, attempt - 1);
-        await sleep(backoffMs);
+        const backoff = 400 * Math.pow(2.2, attempt - 1);
+        await sleep(backoff);
       }
     }
   }
@@ -308,12 +289,13 @@ async function requestJson<T>(
   );
 }
 
+/* -------------------------- JSON HELPERS -------------------------- */
+
 function cleanJsonString(text: string): string {
   let cleaned = text || "";
   cleaned = cleaned.replace(/```json\s*/g, "");
   cleaned = cleaned.replace(/```\s*/g, "");
-  cleaned = cleaned.trim();
-  return cleaned;
+  return cleaned.trim();
 }
 
 function isNonEmptyString(x: any): x is string {
@@ -323,6 +305,8 @@ function isNonEmptyString(x: any): x is string {
 function ensureArray<T>(x: any, fallback: T[] = []): T[] {
   return Array.isArray(x) ? (x as T[]) : fallback;
 }
+
+/* -------------------------- STRUCTURE -------------------------- */
 
 function safeFallbackStructure(input: PentagonInput): VideoStructure {
   const maxDuration = input.constraints?.maxDurationSec || 120;
@@ -370,6 +354,7 @@ function normalizeStructure(structure: any, input: PentagonInput): VideoStructur
 
   let total = 0;
   for (let i = 0; i < scenesSafe.length; i++) total += scenesSafe[i].durationSec;
+
   if (total > maxDuration) {
     const scale = maxDuration / total;
     for (let i = 0; i < scenesSafe.length; i++) {
@@ -423,13 +408,10 @@ async function stageStructure(input: PentagonInput, config: EnvConfig): Promise<
 
   const response = await requestJson<any>(
     "structure_generation",
-    config.openai.baseUrl + "/chat/completions",
+    `${config.openai.baseUrl}/chat/completions`,
     {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Bearer " + config.openai.apiKey,
-      },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.openai.apiKey}` },
       body: JSON.stringify(requestBody),
     },
     config.defaultTimeoutMs,
@@ -439,15 +421,12 @@ async function stageStructure(input: PentagonInput, config: EnvConfig): Promise<
   const content = response?.choices?.[0]?.message?.content || "";
   if (!isNonEmptyString(content)) return safeFallbackStructure(input);
 
-  let parsed: any;
   try {
-    parsed = JSON.parse(cleanJsonString(content));
+    const parsed = JSON.parse(cleanJsonString(content));
+    return normalizeStructure(parsed, input);
   } catch {
-    parsed = null;
+    return safeFallbackStructure(input);
   }
-
-  if (!parsed || typeof parsed !== "object") return safeFallbackStructure(input);
-  return normalizeStructure(parsed, input);
 }
 
 async function stageEdit(structure: VideoStructure, input: PentagonInput, config: EnvConfig): Promise<EditedStructure> {
@@ -479,13 +458,10 @@ async function stageEdit(structure: VideoStructure, input: PentagonInput, config
 
   const response = await requestJson<any>(
     "gpt_edit",
-    config.openai.baseUrl + "/chat/completions",
+    `${config.openai.baseUrl}/chat/completions`,
     {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Bearer " + config.openai.apiKey,
-      },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.openai.apiKey}` },
       body: JSON.stringify(requestBody),
     },
     config.defaultTimeoutMs,
@@ -493,39 +469,37 @@ async function stageEdit(structure: VideoStructure, input: PentagonInput, config
   );
 
   const content = response?.choices?.[0]?.message?.content || "";
-  if (!isNonEmptyString(content)) {
-    return { ...structure, globalNotes: ["Edit stage returned empty output; using original structure."] };
-  }
+  if (!isNonEmptyString(content)) return { ...structure, globalNotes: ["Edit stage returned empty output."] };
 
-  let parsed: any;
   try {
-    parsed = JSON.parse(cleanJsonString(content));
+    const parsed = JSON.parse(cleanJsonString(content));
+    const normalized = normalizeStructure(parsed, input);
+
+    const edited: EditedStructure = {
+      ...normalized,
+      globalNotes: ensureArray<string>(parsed?.globalNotes, []),
+    };
+
+    // duration hard cap
+    let totalDuration = 0;
+    for (let i = 0; i < edited.scenes.length; i++) totalDuration += edited.scenes[i].durationSec;
+    if (totalDuration > maxDuration) {
+      const scale = maxDuration / totalDuration;
+      for (let i = 0; i < edited.scenes.length; i++) {
+        edited.scenes[i].durationSec = Math.max(3, Math.floor(edited.scenes[i].durationSec * scale));
+      }
+      edited.globalNotes.push(`Scaled durations to fit ${maxDuration}s total.`);
+    }
+
+    if (edited.scenes.length > maxScenes) {
+      edited.scenes = edited.scenes.slice(0, maxScenes);
+      edited.globalNotes.push(`Truncated to ${maxScenes} scenes.`);
+    }
+
+    return edited;
   } catch {
     return { ...structure, globalNotes: ["Edit stage returned invalid JSON; using original structure."] };
   }
-
-  const normalized = normalizeStructure(parsed, input);
-  const edited: EditedStructure = {
-    ...normalized,
-    globalNotes: ensureArray<string>(parsed?.globalNotes, []),
-  };
-
-  if (edited.scenes.length > maxScenes) {
-    edited.scenes = edited.scenes.slice(0, maxScenes);
-    edited.globalNotes.push(`Truncated to ${maxScenes} scenes.`);
-  }
-
-  let totalDuration = 0;
-  for (let i = 0; i < edited.scenes.length; i++) totalDuration += edited.scenes[i].durationSec;
-  if (totalDuration > maxDuration) {
-    const scale = maxDuration / totalDuration;
-    for (let i = 0; i < edited.scenes.length; i++) {
-      edited.scenes[i].durationSec = Math.max(3, Math.floor(edited.scenes[i].durationSec * scale));
-    }
-    edited.globalNotes.push(`Scaled durations to fit ${maxDuration}s total.`);
-  }
-
-  return edited;
 }
 
 async function stageLocalize(edited: EditedStructure, config: EnvConfig): Promise<LocalizedStructureKA> {
@@ -537,7 +511,7 @@ async function stageLocalize(edited: EditedStructure, config: EnvConfig): Promis
     "- title_ka (Georgian)",
     "- logline_ka (Georgian)",
     "- IMPORTANT: Use ONLY Georgian letters. No Latin words.",
-    '- scenes_ka: array with same scene IDs, each with beat_ka, camera_ka, setting_ka, characters_ka, action_ka',
+    "- scenes_ka: array with same scene IDs, each with beat_ka, camera_ka, setting_ka, characters_ka, action_ka",
     "- narration_ka: 2-3 sentence Georgian narration for voiceover per scene.",
     "Use native Georgian script only.",
   ].join("\n");
@@ -555,13 +529,10 @@ async function stageLocalize(edited: EditedStructure, config: EnvConfig): Promis
 
   const response = await requestJson<any>(
     "georgian_localization",
-    config.openai.baseUrl + "/chat/completions",
+    `${config.openai.baseUrl}/chat/completions`,
     {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Bearer " + config.openai.apiKey,
-      },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.openai.apiKey}` },
       body: JSON.stringify(requestBody),
     },
     config.defaultTimeoutMs,
@@ -585,43 +556,42 @@ async function stageLocalize(edited: EditedStructure, config: EnvConfig): Promis
     };
   }
 
-  let parsed: any = null;
   try {
-    parsed = JSON.parse(cleanJsonString(content));
-  } catch {
-    parsed = null;
-  }
+    const parsed = JSON.parse(cleanJsonString(content));
 
-  const scenes_ka_raw = ensureArray<any>(parsed?.scenes_ka, []);
-  const scenes_ka_safe =
-    scenes_ka_raw.length > 0
-      ? scenes_ka_raw
-      : ensureArray<any>(parsed?.scenes, []).map((s: any) => ({
-          id: s.id,
-          beat_ka: s.beat_ka || s.beat || "",
-          camera_ka: s.camera_ka || s.camera || "",
-          setting_ka: s.setting_ka || s.setting || "",
-          characters_ka: s.characters_ka || s.characters || [],
-          action_ka: s.action_ka || s.action || "",
-          narration_ka: s.narration_ka || s.action_ka || s.beat_ka || "",
-        }));
+    const scenesRaw = ensureArray<any>(parsed?.scenes_ka, []);
+    const scenesSafe =
+      scenesRaw.length > 0
+        ? scenesRaw
+        : edited.scenes.map((s) => ({
+            id: s.id,
+            beat_ka: "",
+            camera_ka: "",
+            setting_ka: "",
+            characters_ka: [],
+            action_ka: "",
+            narration_ka: s.action,
+          }));
 
-  const scenesFinal = Array.isArray(scenes_ka_safe)
-    ? scenes_ka_safe.map((scene: any) => ({
-        id: isNonEmptyString(scene?.id) ? scene.id : "scene_1",
-        beat_ka: isNonEmptyString(scene?.beat_ka) ? scene.beat_ka : "",
-        camera_ka: isNonEmptyString(scene?.camera_ka) ? scene.camera_ka : "",
-        setting_ka: isNonEmptyString(scene?.setting_ka) ? scene.setting_ka : "",
-        characters_ka: ensureArray<string>(scene?.characters_ka, []).filter(isNonEmptyString),
-        action_ka: isNonEmptyString(scene?.action_ka) ? scene.action_ka : "",
-        narration_ka: isNonEmptyString(scene?.narration_ka) ? scene.narration_ka : "",
-      }))
-    : [];
+    const scenesFinal = scenesSafe.map((scene: any) => ({
+      id: isNonEmptyString(scene?.id) ? scene.id : "scene_1",
+      beat_ka: isNonEmptyString(scene?.beat_ka) ? scene.beat_ka : "",
+      camera_ka: isNonEmptyString(scene?.camera_ka) ? scene.camera_ka : "",
+      setting_ka: isNonEmptyString(scene?.setting_ka) ? scene.setting_ka : "",
+      characters_ka: ensureArray<string>(scene?.characters_ka, []).filter(isNonEmptyString),
+      action_ka: isNonEmptyString(scene?.action_ka) ? scene.action_ka : "",
+      narration_ka: isNonEmptyString(scene?.narration_ka) ? scene.narration_ka : "",
+    }));
 
-  if (scenesFinal.length === 0) {
     return {
       title_ka: isNonEmptyString(parsed?.title_ka) ? parsed.title_ka : "უსათაურო",
       logline_ka: isNonEmptyString(parsed?.logline_ka) ? parsed.logline_ka : "",
+      scenes_ka: scenesFinal,
+    };
+  } catch {
+    return {
+      title_ka: "უსათაურო",
+      logline_ka: "",
       scenes_ka: edited.scenes.map((s) => ({
         id: s.id,
         beat_ka: s.beat,
@@ -633,87 +603,11 @@ async function stageLocalize(edited: EditedStructure, config: EnvConfig): Promis
       })),
     };
   }
-
-  return {
-    title_ka: isNonEmptyString(parsed?.title_ka) ? parsed.title_ka : "უსათაურო",
-    logline_ka: isNonEmptyString(parsed?.logline_ka) ? parsed.logline_ka : "",
-    scenes_ka: scenesFinal,
-  };
 }
 
-/** Edge-safe base64 encoding from ArrayBuffer */
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const chunk = bytes.subarray(i, i + chunkSize);
-    binary += String.fromCharCode(...chunk);
-  }
-  return btoa(binary);
-}
+/* -------------------------- VOICEOVER -------------------------- */
 
-function base64DataUrlToBytes(dataUrl: string): Uint8Array {
-  const idx = dataUrl.indexOf("base64,");
-  const b64 = idx >= 0 ? dataUrl.slice(idx + "base64,".length) : dataUrl;
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
-
-async function elevenLabsTTS(text: string, config: EnvConfig): Promise<string> {
-  if (!isNonEmptyString(config.elevenlabs.apiKey) || !isNonEmptyString(config.elevenlabs.voiceId)) {
-    throw new PipelineError({
-      stage: "voiceover_generation",
-      code: "BAD_REQUEST",
-      message: "ElevenLabs is not configured (missing ELEVENLABS_API_KEY or ELEVENLABS_VOICE_ID).",
-      retryable: false,
-    });
-  }
-
-  const url = `${config.elevenlabs.baseUrl}/text-to-speech/${encodeURIComponent(
-    config.elevenlabs.voiceId
-  )}?output_format=mp3_44100_128`;
-
-  const body = {
-    text,
-    model_id: "eleven_multilingual_v2",
-    voice_settings: {
-      stability: 0.45,
-      similarity_boost: 0.85,
-      style: 0.25,
-      use_speaker_boost: true,
-    },
-  };
-
-  const resp = await fetchWithTimeout(
-    url,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "xi-api-key": config.elevenlabs.apiKey,
-      },
-      body: JSON.stringify(body),
-    },
-    config.defaultTimeoutMs
-  );
-
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => "");
-    throw new PipelineError({
-      stage: "voiceover_generation",
-      code: resp.status === 429 ? "RATE_LIMIT" : "UPSTREAM_ERROR",
-      message: `ElevenLabs TTS failed (HTTP ${resp.status}): ${t}`,
-      retryable: resp.status === 429 || resp.status >= 500,
-    });
-  }
-
-  const buf = await resp.arrayBuffer();
-  const b64 = arrayBufferToBase64(buf);
-  return `data:audio/mpeg;base64,${b64}`;
-}
+type LocalizedSceneKA = LocalizedStructureKA["scenes_ka"][number];
 
 async function googleTTS(text: string, config: EnvConfig): Promise<string> {
   const url = `${config.googleTts.baseUrl}/text:synthesize?key=${encodeURIComponent(config.googleTts.apiKey)}`;
@@ -727,11 +621,7 @@ async function googleTTS(text: string, config: EnvConfig): Promise<string> {
   const data = await requestJson<any>(
     "voiceover_generation",
     url,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    },
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
     config.defaultTimeoutMs,
     2
   );
@@ -748,9 +638,6 @@ async function googleTTS(text: string, config: EnvConfig): Promise<string> {
 
   return `data:audio/mpeg;base64,${audioContent}`;
 }
-
-// ✅ FIX: prevent TypeScript "never"
-type LocalizedSceneKA = LocalizedStructureKA["scenes_ka"][number];
 
 async function stageVoiceover(localized: LocalizedStructureKA, config: EnvConfig): Promise<VoiceoverPack> {
   const scenesRaw = Array.isArray(localized?.scenes_ka) ? localized.scenes_ka : [];
@@ -771,7 +658,7 @@ async function stageVoiceover(localized: LocalizedStructureKA, config: EnvConfig
 
   const voiceovers: VoiceoverPack["voiceovers"] = [];
 
-  for (let i = 0; i < scenes.length; i = i + 1) {
+  for (let i = 0; i < scenes.length; i++) {
     const scene = scenes[i];
     const text = (scene?.narration_ka ?? scene?.action_ka ?? scene?.beat_ka ?? "").toString().trim();
 
@@ -780,25 +667,20 @@ async function stageVoiceover(localized: LocalizedStructureKA, config: EnvConfig
       continue;
     }
 
-    // ✅ PRIMARY: Google TTS
     try {
       const audioUrl = await googleTTS(text, config);
       voiceovers.push({ sceneId: scene.id, text, audioUrl, provider: "google_tts" });
-    } catch (err) {
-      // ✅ OPTIONAL fallback: ElevenLabs (only if configured)
-      try {
-        const audioUrl = await elevenLabsTTS(text, config);
-        voiceovers.push({ sceneId: scene.id, text, audioUrl, provider: "elevenlabs" });
-      } catch {
-        voiceovers.push({ sceneId: scene.id, text, audioUrl: "", provider: "none" });
-      }
+    } catch {
+      voiceovers.push({ sceneId: scene.id, text, audioUrl: "", provider: "none" });
     }
 
-    await sleep(150);
+    await sleep(120);
   }
 
   return { voiceovers };
 }
+
+/* -------------------------- VISUAL PROMPTS + VIDEO SEARCH -------------------------- */
 
 async function stageVisualPromptsFromActions(edited: EditedStructure): Promise<VisualPromptPack> {
   const scenes = ensureArray<EditedStructure["scenes"][number]>(edited?.scenes, []);
@@ -812,30 +694,26 @@ async function stageVisualPromptsFromActions(edited: EditedStructure): Promise<V
 async function pexelsSearchOneVideo(query: string, config: EnvConfig): Promise<{ imageUrl: string; videoUrl: string }> {
   const searchUrl = `${config.pexels.baseUrl}/search?query=${encodeURIComponent(query)}&per_page=1&orientation=portrait`;
 
-  const response = await fetchWithTimeout(
+  const resp = await fetchWithTimeout(
     searchUrl,
     {
       method: "GET",
-      headers: {
-        Authorization: config.pexels.apiKey,
-        "Content-Type": "application/json",
-      },
+      headers: { Authorization: config.pexels.apiKey, "Content-Type": "application/json" },
     },
     config.defaultTimeoutMs
   );
 
-  if (!response.ok) {
-    const t = await response.text().catch(() => "");
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => "");
     throw new PipelineError({
       stage: "video_rendering",
-      code: response.status === 429 ? "RATE_LIMIT" : "UPSTREAM_ERROR",
-      message: `Pexels search failed (HTTP ${response.status}): ${t}`,
-      retryable: response.status === 429 || response.status >= 500,
+      code: resp.status === 429 ? "RATE_LIMIT" : "UPSTREAM_ERROR",
+      message: `Pexels search failed (HTTP ${resp.status}): ${t}`,
+      retryable: resp.status === 429 || resp.status >= 500,
     });
   }
 
-  const data = await response.json();
-
+  const data = await resp.json();
   const videos = ensureArray<any>(data?.videos, []);
   if (videos.length === 0) return { imageUrl: "", videoUrl: "" };
 
@@ -856,7 +734,7 @@ async function stageVideoRender(prompts: VisualPromptPack, config: EnvConfig): P
   const shots = ensureArray<VisualPromptPack["shots"][number]>(prompts?.shots, []);
   const renders: VideoRender[] = [];
 
-  for (let i = 0; i < shots.length; i = i + 1) {
+  for (let i = 0; i < shots.length; i++) {
     const shot = shots[i];
     const query = (shot?.prompt || "").trim();
 
@@ -872,90 +750,14 @@ async function stageVideoRender(prompts: VisualPromptPack, config: EnvConfig): P
       renders.push({ sceneId: shot.sceneId, imageUrl: "", videoUrl: "" });
     }
 
-    await sleep(200);
+    await sleep(160);
   }
 
   return renders;
 }
 
-/**
- * ✅ Optional: upload voiceover mp3 (data URL) to Supabase Storage and return a public URL.
- * Requires:
- * - SUPABASE_URL
- * - SUPABASE_SERVICE_ROLE_KEY
- * - SUPABASE_AUDIO_BUCKET (bucket must exist; ideally public)
- */
-async function maybeUploadVoiceoversToSupabaseStorage(
-  requestId: string,
-  voiceovers: VoiceoverPack,
-  config: EnvConfig
-): Promise<VoiceoverPack> {
-  const sb = config.supabase;
-  if (!isNonEmptyString(sb.url) || !isNonEmptyString(sb.serviceRoleKey)) return voiceovers;
-  if (!isNonEmptyString(sb.audioBucket)) return voiceovers;
+/* -------------------------- SUPABASE: ENQUEUE RENDER JOB -------------------------- */
 
-  const out: VoiceoverPack["voiceovers"] = [];
-
-  for (let i = 0; i < voiceovers.voiceovers.length; i++) {
-    const v = voiceovers.voiceovers[i];
-    const audioUrl = v.audioUrl || "";
-
-    // only upload if data URL base64
-    if (!audioUrl.startsWith("data:audio/") || audioUrl.indexOf("base64,") === -1) {
-      out.push(v);
-      continue;
-    }
-
-    try {
-      const bytes = base64DataUrlToBytes(audioUrl);
-      const objectPath = `voiceovers/${encodeURIComponent(requestId)}/${encodeURIComponent(v.sceneId)}.mp3`;
-      const putUrl = `${sb.url}/storage/v1/object/${encodeURIComponent(sb.audioBucket)}/${objectPath}`;
-
-      const resp = await fetchWithTimeout(
-        putUrl,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${sb.serviceRoleKey}`,
-            apikey: sb.serviceRoleKey,
-            "Content-Type": "audio/mpeg",
-            "x-upsert": "true",
-          },
-          body: bytes,
-        },
-        config.defaultTimeoutMs
-      );
-
-      if (!resp.ok) {
-        out.push(v); // fallback to original data url
-        continue;
-      }
-
-      // public URL (bucket should be public for direct playback)
-      const publicUrl = sb.publicBaseUrl
-        ? `${sb.publicBaseUrl}/${encodeURIComponent(sb.audioBucket)}/${objectPath}`
-        : `${sb.url}/storage/v1/object/public/${encodeURIComponent(sb.audioBucket)}/${objectPath}`;
-
-      out.push({ ...v, audioUrl: publicUrl });
-    } catch {
-      out.push(v);
-    }
-
-    await sleep(40);
-  }
-
-  return { voiceovers: out };
-}
-
-/**
- * ✅ Step 1: "Close the loop"
- * Insert a queued job into Supabase render_jobs with the full payload.
- *
- * Required ENV on Vercel:
- * - SUPABASE_URL
- * - SUPABASE_SERVICE_ROLE_KEY
- * - (optional) SUPABASE_RENDER_JOBS_TABLE (default render_jobs)
- */
 async function enqueueRenderJobToSupabase(args: {
   requestId: string;
   payload: any;
@@ -968,8 +770,7 @@ async function enqueueRenderJobToSupabase(args: {
     throw new PipelineError({
       stage: "video_rendering",
       code: "BAD_REQUEST",
-      message:
-        "Supabase enqueue is not configured. Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY on Vercel.",
+      message: "Supabase enqueue not configured. Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY on Vercel.",
       retryable: false,
     });
   }
@@ -977,12 +778,13 @@ async function enqueueRenderJobToSupabase(args: {
   const table = sb.renderJobsTable || "render_jobs";
   const url = `${sb.url}/rest/v1/${encodeURIComponent(table)}`;
 
-  // NOTE: Column names assumed: request_id, status, payload, created_at, updated_at
-  // If your schema differs, change keys here to match.
+  // ✅ Adjust keys if your DB schema differs
   const row = {
     request_id: requestId,
     status: "queued",
-    payload,
+    payload, // ✅ entire PentagonOutput payload
+    final_video_url: null,
+    error_message: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
@@ -1007,16 +809,21 @@ async function enqueueRenderJobToSupabase(args: {
     throw new PipelineError({
       stage: "video_rendering",
       code: "UPSTREAM_ERROR",
-      message: `Failed to enqueue render job in Supabase (HTTP ${resp.status}): ${t}`,
+      message: `Failed to enqueue render job (HTTP ${resp.status}): ${t}`,
       retryable: resp.status === 429 || resp.status >= 500,
     });
   }
 
   const data = (await resp.json().catch(() => null)) as any;
-  // With return=representation, Supabase returns array of inserted rows.
-  const id = Array.isArray(data) && data[0] ? (data[0].id || data[0].job_id || "") : "";
+
+  // Supabase returns an array with Prefer:return=representation
+  const inserted = Array.isArray(data) ? data[0] : null;
+  const id = inserted?.id || inserted?.job_id || "";
+
   return isNonEmptyString(id) ? String(id) : "";
 }
+
+/* -------------------------- MAIN PIPELINE -------------------------- */
 
 export async function runPentagonPipeline(input: PentagonInput): Promise<PentagonOutput> {
   const startedAt = new Date().toISOString();
@@ -1046,11 +853,8 @@ export async function runPentagonPipeline(input: PentagonInput): Promise<Pentago
   timings.georgian_localization = Date.now() - t0;
 
   t0 = Date.now();
-  let voiceovers = await stageVoiceover(localized, config);
+  const voiceovers = await stageVoiceover(localized, config);
   timings.voiceover_generation = Date.now() - t0;
-
-  // ✅ recommended: store MP3 in Supabase Storage (avoids huge DB row)
-  voiceovers = await maybeUploadVoiceoversToSupabaseStorage(input.requestId, voiceovers, config);
 
   t0 = Date.now();
   const visualPrompts = await stageVisualPromptsFromActions(edited);
@@ -1061,11 +865,9 @@ export async function runPentagonPipeline(input: PentagonInput): Promise<Pentago
   timings.video_rendering = Date.now() - t0;
 
   const finishedAt = new Date().toISOString();
-
-  // This is just "a first pexels clip url" (NOT final stitched video)
   const finalVideoUrl = videos.find((v) => isNonEmptyString(v.videoUrl))?.videoUrl || "";
 
-  // ✅ Step 1: enqueue job to Supabase (worker will pick it and render final mp4)
+  // ✅ Payload for worker (full PentagonOutput pack)
   const payload = {
     requestId: input.requestId,
     input,
@@ -1075,7 +877,6 @@ export async function runPentagonPipeline(input: PentagonInput): Promise<Pentago
     voiceovers,
     visualPrompts,
     videos,
-    // worker can use this for logs/debug
     meta: {
       startedAt,
       finishedAt,
@@ -1083,6 +884,7 @@ export async function runPentagonPipeline(input: PentagonInput): Promise<Pentago
     },
   };
 
+  // ✅ Trigger: enqueue render job for Fly worker
   const renderJobId = await enqueueRenderJobToSupabase({
     requestId: input.requestId,
     payload,
@@ -1105,4 +907,4 @@ export async function runPentagonPipeline(input: PentagonInput): Promise<Pentago
       stageTimingsMs: timings,
     },
   };
-          }
+                                     }
