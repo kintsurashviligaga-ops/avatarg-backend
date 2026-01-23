@@ -1,40 +1,63 @@
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
+// lib/supabaseAdmin.ts
+import "server-only";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
-let adminClient: SupabaseClient | null = null;
+declare global {
+  // Prevent multiple instances in dev / HMR
+  // eslint-disable-next-line no-var
+  var __supabaseAdmin: SupabaseClient | undefined;
+}
 
-function getAdminClient(): SupabaseClient {
-  if (adminClient) {
-    return adminClient;
-  }
+function getEnv(name: string) {
+  const v = process.env[name];
+  return v && v.trim().length > 0 ? v.trim() : undefined;
+}
 
-  // Use NEXT_PUBLIC_ or fallback to VITE_ prefix
-  const supabaseUrl = 
-    process.env.NEXT_PUBLIC_SUPABASE_URL || 
-    process.env.VITE_SUPABASE_URL || 
-    process.env.SUPABASE_URL;
+function resolveSupabaseUrl() {
+  return (
+    getEnv("NEXT_PUBLIC_SUPABASE_URL") ||
+    getEnv("VITE_SUPABASE_URL") ||
+    getEnv("SUPABASE_URL")
+  );
+}
 
-  const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+function resolveServiceRoleKey() {
+  return getEnv("SUPABASE_SERVICE_ROLE_KEY");
+}
 
-  if (!supabaseUrl || !supabaseServiceKey) {
+export function getSupabaseAdmin(): SupabaseClient {
+  if (global.__supabaseAdmin) return global.__supabaseAdmin;
+
+  const supabaseUrl = resolveSupabaseUrl();
+  const serviceRoleKey = resolveServiceRoleKey();
+
+  if (!supabaseUrl) {
     throw new Error(
-      'Missing Supabase admin environment variables: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY'
+      "Missing Supabase URL env var. Set one of: NEXT_PUBLIC_SUPABASE_URL, VITE_SUPABASE_URL, SUPABASE_URL"
     );
   }
 
-  adminClient = createClient(supabaseUrl, supabaseServiceKey, {
+  if (!serviceRoleKey) {
+    throw new Error(
+      "Missing SUPABASE_SERVICE_ROLE_KEY env var (server-only). Do NOT expose this to the client."
+    );
+  }
+
+  const client = createClient(supabaseUrl, serviceRoleKey, {
     auth: {
       autoRefreshToken: false,
-      persistSession: false
-    }
+      persistSession: false,
+      detectSessionInUrl: false,
+    },
+    global: {
+      // Optional: add a tag for logs/diagnostics
+      headers: { "X-Client-Info": "avatar-g/supabase-admin" },
+    },
   });
 
-  return adminClient;
+  global.__supabaseAdmin = client;
+  return client;
 }
 
-export const supabaseAdmin = new Proxy({} as SupabaseClient, {
-  get: (target, prop) => {
-    const client = getAdminClient();
-    const value = (client as any)[prop];
-    return typeof value === 'function' ? value.bind(client) : value;
-  }
-});
+// ✅ Default export style used by most server files
+export const supabaseAdmin = getSupabaseAdmin();
