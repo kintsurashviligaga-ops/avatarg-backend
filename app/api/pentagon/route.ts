@@ -1,109 +1,118 @@
 import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-function getSupabaseAdmin() {
-  const url = process.env.SUPABASE_URL?.trim();
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
-  if (!url || !key) return null;
+const DEFAULT_TARGET = 'https://avatarg-backend.vercel.app/api/pentagon';
 
-  return createClient(url, key, {
-    auth: { persistSession: false },
-  });
+function pickTarget() {
+  const env = process.env.PENTAGON_BACKEND_URL?.trim();
+  return env && env.startsWith('http') ? env : DEFAULT_TARGET;
 }
 
-function makeJobId() {
-  return `job_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+function withTimeout(ms: number) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), ms);
+  return { controller, cleanup: () => clearTimeout(t) };
 }
 
-function clamp(n: number, min: number, max: number) {
-  if (Number.isNaN(n)) return min;
-  return Math.max(min, Math.min(max, n));
+function safeJson(text: string) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+// ✅ Health check endpoint for UI ("Endpoint Check")
+export async function GET() {
+  return NextResponse.json(
+    {
+      ok: true,
+      route: '/api/pentagon',
+      upstream: pickTarget(),
+      methods: ['POST'],
+      note: 'Local proxy endpoint ready (CORS-safe)',
+      ts: new Date().toISOString(),
+    },
+    {
+      headers: {
+        'Cache-Control': 'no-store',
+      },
+    }
+  );
 }
 
 export async function POST(req: Request) {
-  const supabase = getSupabaseAdmin();
-  if (!supabase) {
-    return NextResponse.json(
-      { success: false, error: 'SUPABASE_URL ან SUPABASE_SERVICE_ROLE_KEY არ არის დაყენებული backend env-ში.' },
-      { status: 500 }
-    );
-  }
+  const target = pickTarget();
 
   try {
-    const body = await req.json();
-    const userPrompt = String(body?.userPrompt || '').trim();
-    const constraints = body?.constraints || {};
+    // Keep raw body (works for JSON; avoids double-parse issues)
+    const body = await req.text();
 
-    if (!userPrompt) {
-      return NextResponse.json({ success: false, error: 'userPrompt is required' }, { status: 400 });
-    }
+    // Forward only safe/useful headers
+    const incoming = req.headers;
+    const headers: Record<string, string> = {
+      'Content-Type': incoming.get('content-type') || 'application/json',
+      Accept: incoming.get('accept') || 'application/json',
+      'Cache-Control': 'no-store',
+    };
 
-    const maxScenes = clamp(Number(constraints?.maxScenes ?? 5), 1, 12);
-    const maxDurationSec = clamp(Number(constraints?.maxDurationSec ?? 15), 5, 180);
+    // Forward auth headers if present
+    const authorization = incoming.get('authorization');
+    if (authorization) headers.Authorization = authorization;
 
-    const jobId = makeJobId();
+    const apiKey = incoming.get('x-api-key');
+    if (apiKey) headers['x-api-key'] = apiKey;
 
-    // 1) Create job row
-    const { error: insertErr } = await supabase.from('render_jobs').insert({
-      id: jobId,
-      status: 'queued',
-      progress: 0,
-      final_video_url: null,
-      error: null,
-    });
+    const apikey = incoming.get('apikey');
+    if (apikey) headers.apikey = apikey;
 
-    if (insertErr) {
-      return NextResponse.json({ success: false, error: insertErr.message }, { status: 500 });
-    }
+    // Trace headers
+    headers['x-proxy'] = 'avatar-g-frontend';
+    headers['x-forwarded-at'] = new Date().toISOString();
 
-    // 2) IMPORTANT:
-    // Vercel serverless ვერ აკეთებს “ბექგრაუნდ worker”-ს საიმედოდ ამავე request-ში დიდი ხნით.
-    // მაგრამ polling-ს დასატესტად ვაკეთებთ "მოკლე სიმულაციას":
-    // - პირველივე წამებში ვწერთ processing/progress
-    // - მერე ვწერთ completed + final url
-    //
-    // როცა რეალურ pipeline-ს ჩასვამ,
-    // აქედან უბრალოდ დააბრუნე jobId და დანარჩენს გააკეთებს worker/queue.
+    const { controller, cleanup } = withTimeout(120_000); // 120s
+    let upstreamRes: Response;
 
-    // Quick simulate progress updates (fire-and-forget style; may not always run, but often enough for test)
-    Promise.resolve()
-      .then(async () => {
-        await supabase.from('render_jobs').update({ status: 'processing', progress: 15 }).eq('id', jobId);
-        await new Promise((r) => setTimeout(r, 1200));
-
-        await supabase.from('render_jobs').update({ status: 'rendering', progress: 55 }).eq('id', jobId);
-        await new Promise((r) => setTimeout(r, 1200));
-
-        await supabase.from('render_jobs').update({ status: 'uploading', progress: 85 }).eq('id', jobId);
-        await new Promise((r) => setTimeout(r, 1000));
-
-        // საბოლოო URL — ახლა mock
-        const finalUrl = 'https://www.w3schools.com/html/mov_bbb.mp4';
-
-        await supabase
-          .from('render_jobs')
-          .update({ status: 'completed', progress: 100, final_video_url: finalUrl })
-          .eq('id', jobId);
-      })
-      .catch(async (e) => {
-        await supabase
-          .from('render_jobs')
-          .update({ status: 'error', error: e?.message || String(e) })
-          .eq('id', jobId);
+    try {
+      upstreamRes = await fetch(target, {
+        method: 'POST',
+        headers,
+        body,
+        signal: controller.signal,
+        cache: 'no-store',
       });
+    } finally {
+      cleanup();
+    }
 
-    // 3) Return job id (frontend will poll /api/render-status)
-    return NextResponse.json({
-      success: true,
-      renderJobId: jobId,
-      accepted: true,
-      constraints: { maxScenes, maxDurationSec },
-      note: 'Job queued. Poll /api/render-status?jobId=... for progress.',
+    const text = await upstreamRes.text();
+    const ct = upstreamRes.headers.get('content-type') || '';
+
+    // Try to keep JSON consistent
+    const parsed = safeJson(text);
+    const isJson = ct.includes('application/json') || parsed !== null;
+
+    return new NextResponse(isJson ? JSON.stringify(parsed ?? {}) : text, {
+      status: upstreamRes.status,
+      headers: {
+        'Content-Type': isJson
+          ? 'application/json; charset=utf-8'
+          : ct || 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+      },
     });
   } catch (err: any) {
-    return NextResponse.json({ success: false, error: err?.message || 'Internal server error' }, { status: 500 });
+    const isAbort = err?.name === 'AbortError';
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: isAbort ? 'Upstream timeout (120s)' : err?.message || 'Proxy failed',
+        target,
+      },
+      { status: isAbort ? 504 : 500 }
+    );
   }
-}
+      }
