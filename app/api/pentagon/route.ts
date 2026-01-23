@@ -5,9 +5,10 @@ export const dynamic = 'force-dynamic';
 
 const DEFAULT_TARGET = 'https://avatarg-backend.vercel.app/api/pentagon';
 
+// ✅ Keep this strict: only absolute http(s) URLs allowed
 function pickTarget() {
   const env = process.env.PENTAGON_BACKEND_URL?.trim();
-  return env && env.startsWith('http') ? env : DEFAULT_TARGET;
+  return env && /^https?:\/\//i.test(env) ? env : DEFAULT_TARGET;
 }
 
 function withTimeout(ms: number) {
@@ -24,22 +25,40 @@ function safeJson(text: string) {
   }
 }
 
+function getOrigin(req: Request) {
+  // Some requests have no origin in server-to-server calls
+  return req.headers.get('origin') || '*';
+}
+
+function corsHeaders(req: Request) {
+  const origin = getOrigin(req);
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key, apikey',
+    'Access-Control-Allow-Credentials': 'true',
+    'Cache-Control': 'no-store',
+  } as Record<string, string>;
+}
+
+// ✅ Preflight
+export async function OPTIONS(req: Request) {
+  return new NextResponse(null, { status: 204, headers: corsHeaders(req) });
+}
+
 // ✅ Health check endpoint for UI ("Endpoint Check")
-export async function GET() {
+export async function GET(req: Request) {
+  const target = pickTarget();
   return NextResponse.json(
     {
       ok: true,
       route: '/api/pentagon',
-      upstream: pickTarget(),
+      upstream: target,
       methods: ['POST'],
       note: 'Local proxy endpoint ready (CORS-safe)',
       ts: new Date().toISOString(),
     },
-    {
-      headers: {
-        'Cache-Control': 'no-store',
-      },
-    }
+    { headers: corsHeaders(req) }
   );
 }
 
@@ -47,6 +66,21 @@ export async function POST(req: Request) {
   const target = pickTarget();
 
   try {
+    // ✅ Loop protection: if someone sets target to THIS SAME app domain, stop immediately
+    const host = req.headers.get('host') || '';
+    if (host && target.includes(host)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            'Proxy loop detected: PENTAGON_BACKEND_URL points to the same frontend domain. Set it to the BACKEND domain only.',
+          target,
+          host,
+        },
+        { status: 508, headers: corsHeaders(req) }
+      );
+    }
+
     // Keep raw body (works for JSON; avoids double-parse issues)
     const body = await req.text();
 
@@ -56,6 +90,9 @@ export async function POST(req: Request) {
       'Content-Type': incoming.get('content-type') || 'application/json',
       Accept: incoming.get('accept') || 'application/json',
       'Cache-Control': 'no-store',
+      // Trace headers (safe)
+      'x-proxy': 'avatar-g-frontend',
+      'x-forwarded-at': new Date().toISOString(),
     };
 
     // Forward auth headers if present
@@ -68,13 +105,10 @@ export async function POST(req: Request) {
     const apikey = incoming.get('apikey');
     if (apikey) headers.apikey = apikey;
 
-    // Trace headers
-    headers['x-proxy'] = 'avatar-g-frontend';
-    headers['x-forwarded-at'] = new Date().toISOString();
+    // ✅ Timeout (video pipeline can be slow)
+    const { controller, cleanup } = withTimeout(120_000);
 
-    const { controller, cleanup } = withTimeout(120_000); // 120s
     let upstreamRes: Response;
-
     try {
       upstreamRes = await fetch(target, {
         method: 'POST',
@@ -90,17 +124,19 @@ export async function POST(req: Request) {
     const text = await upstreamRes.text();
     const ct = upstreamRes.headers.get('content-type') || '';
 
-    // Try to keep JSON consistent
+    // If upstream returns JSON, ensure we return JSON too
     const parsed = safeJson(text);
     const isJson = ct.includes('application/json') || parsed !== null;
 
-    return new NextResponse(isJson ? JSON.stringify(parsed ?? {}) : text, {
+    const outBody = isJson ? JSON.stringify(parsed ?? {}) : text;
+
+    return new NextResponse(outBody, {
       status: upstreamRes.status,
       headers: {
+        ...corsHeaders(req),
         'Content-Type': isJson
           ? 'application/json; charset=utf-8'
           : ct || 'text/plain; charset=utf-8',
-        'Cache-Control': 'no-store',
       },
     });
   } catch (err: any) {
@@ -112,7 +148,7 @@ export async function POST(req: Request) {
         error: isAbort ? 'Upstream timeout (120s)' : err?.message || 'Proxy failed',
         target,
       },
-      { status: isAbort ? 504 : 500 }
+      { status: isAbort ? 504 : 500, headers: corsHeaders(req) }
     );
   }
-      }
+}
