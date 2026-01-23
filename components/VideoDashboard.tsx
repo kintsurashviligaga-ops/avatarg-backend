@@ -1,7 +1,17 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+
+/**
+ * ✅ Guarantees:
+ * - Polls render job status every 3 seconds after renderJobId exists
+ * - Stops polling automatically on: done/completed OR error/failed OR not_found
+ * - Robust URL extraction:
+ *    - row.final_video_url / row.finalVideoUrl
+ *    - row.result.publicUrl (your worker)
+ * - Tries RPC get_render_job_status(job_id); if fails => falls back to direct table read
+ */
 
 type PipelineStage =
   | "structure_generation"
@@ -49,10 +59,10 @@ type PentagonOutput = {
   visualPrompts: { shots: Array<{ sceneId: string; prompt: string }> };
   videos: Array<{ sceneId: string; imageUrl: string; videoUrl: string }>;
 
-  // pexels fallback (NOT final stitched)
+  // fallback preview (not stitched)
   finalVideoUrl: string;
 
-  // ✅ new
+  // ✅ worker job id
   renderJobId?: string;
 
   meta: {
@@ -67,7 +77,9 @@ type RenderJobStatus =
   | "processing"
   | "finalizing"
   | "completed"
+  | "done"
   | "error"
+  | "failed"
   | "not_found"
   | "unknown";
 
@@ -100,8 +112,7 @@ function makeRequestId() {
   return "req_" + Math.random().toString(36).slice(2) + "_" + Date.now().toString(36);
 }
 
-// ✅ client-side supabase (anon)
-function getSupabaseClient() {
+function createSupabaseClient(): SupabaseClient | null {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
   const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
   if (!url || !anon) return null;
@@ -114,22 +125,38 @@ function normalizeJobStatus(s: any): RenderJobStatus {
   if (v === "processing") return "processing";
   if (v === "finalizing") return "finalizing";
   if (v === "completed") return "completed";
+  if (v === "done") return "done"; // ✅ your worker uses "done"
   if (v === "error") return "error";
+  if (v === "failed") return "failed";
   if (v === "not_found") return "not_found";
   return "unknown";
+}
+
+function isTerminalStatus(s: RenderJobStatus) {
+  return s === "completed" || s === "done" || s === "error" || s === "failed" || s === "not_found";
+}
+
+function isSuccessStatus(s: RenderJobStatus) {
+  return s === "completed" || s === "done";
+}
+
+function isFailStatus(s: RenderJobStatus) {
+  return s === "error" || s === "failed";
 }
 
 function statusLabel(s: RenderJobStatus) {
   switch (s) {
     case "queued":
-      return "Queued for Rendering";
+      return "Waiting for an available render node...";
     case "processing":
-      return "Processing Video";
+      return "FFmpeg is stitching your video and burning subtitles...";
     case "finalizing":
-      return "Finalizing";
+      return "Finalizing video...";
     case "completed":
+    case "done":
       return "Completed";
     case "error":
+    case "failed":
       return "Render Failed";
     case "not_found":
       return "Job Not Found";
@@ -138,8 +165,44 @@ function statusLabel(s: RenderJobStatus) {
   }
 }
 
+function extractFinalUrlFromRow(row: any): string | null {
+  if (!row) return null;
+
+  // direct fields if your RPC returns them
+  const direct =
+    row.final_video_url ??
+    row.finalVideoUrl ??
+    row.publicUrl ??
+    row.url ??
+    null;
+
+  if (typeof direct === "string" && direct.startsWith("http")) return direct;
+
+  // JSONB result from worker
+  const r = row.result ?? null;
+  if (!r) return null;
+
+  if (typeof r === "string") {
+    try {
+      const parsed = JSON.parse(r);
+      const u = parsed?.publicUrl ?? parsed?.finalVideoUrl ?? parsed?.url ?? null;
+      return typeof u === "string" && u.startsWith("http") ? u : null;
+    } catch {
+      return r.startsWith("http") ? r : null;
+    }
+  }
+
+  if (typeof r === "object") {
+    const u = r.publicUrl ?? r.finalVideoUrl ?? r.url ?? null;
+    return typeof u === "string" && u.startsWith("http") ? u : null;
+  }
+
+  return null;
+}
+
 export default function VideoDashboard() {
   const apiUrl = process.env.NEXT_PUBLIC_PENTAGON_API_URL || "";
+  const supabase = useMemo(() => createSupabaseClient(), []);
 
   const [prompt, setPrompt] = useState("შექმენი მუსიკალური კლიპი");
   const [maxScenes, setMaxScenes] = useState(5);
@@ -147,6 +210,7 @@ export default function VideoDashboard() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>("");
+
   const [data, setData] = useState<PentagonOutput | null>(null);
 
   // ✅ render job state
@@ -155,6 +219,7 @@ export default function VideoDashboard() {
   const [renderPolling, setRenderPolling] = useState(false);
 
   const pollerRef = useRef<number | null>(null);
+  const inFlightRef = useRef(false);
 
   const stageTimings = data?.meta?.stageTimingsMs || {};
   const totalMs = useMemo(() => {
@@ -167,11 +232,9 @@ export default function VideoDashboard() {
   }, [stageTimings]);
 
   const segments = useMemo(() => {
-    const segs = STAGES.map((s) => {
-      const ms = stageTimings[s.key] ?? 0;
-      return { ...s, ms };
-    });
-    const sum = segs.reduce((a, b) => a + (typeof b.ms === "number" ? b.ms : 0), 0) || 1;
+    const segs = STAGES.map((s) => ({ ...s, ms: stageTimings[s.key] ?? 0 }));
+    const sum =
+      segs.reduce((a, b) => a + (typeof b.ms === "number" ? b.ms : 0), 0) || 1;
     return segs.map((x) => ({ ...x, pct: Math.max(1, Math.round((x.ms / sum) * 100)) }));
   }, [stageTimings]);
 
@@ -197,80 +260,119 @@ export default function VideoDashboard() {
   }, [data]);
 
   const finalMp4Url = useMemo(() => {
-    // ✅ prefer stitched final mp4 from worker result
+    // ✅ prefer worker stitched mp4
     const fromWorker = renderStatus?.finalVideoUrl || "";
     if (fromWorker) return fromWorker;
 
-    // fallback (not stitched) from pipeline
+    // fallback preview
     return data?.finalVideoUrl || "";
   }, [renderStatus, data]);
 
-  function stopPolling() {
+  const stopPolling = useCallback(() => {
     if (pollerRef.current) {
       window.clearInterval(pollerRef.current);
       pollerRef.current = null;
     }
     setRenderPolling(false);
-  }
+    inFlightRef.current = false;
+  }, []);
 
-  async function fetchRenderJobStatus(jobId: string) {
-    const supabase = getSupabaseClient();
-    if (!supabase) {
-      setError("Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY.");
-      return;
-    }
+  const fetchRenderJobStatus = useCallback(
+    async (jobId: string) => {
+      if (!supabase) {
+        setError("Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY.");
+        stopPolling();
+        return;
+      }
+      if (!jobId) return;
+      if (inFlightRef.current) return;
+      inFlightRef.current = true;
 
-    // ✅ RPC: public.get_render_job_status(uuid)
-    const { data: rpcData, error: rpcError } = await supabase.rpc("get_render_job_status", {
-      job_id: jobId,
-    });
+      try {
+        let row: any = null;
 
-    if (rpcError) {
-      setRenderStatus({
-        id: jobId,
-        status: "unknown",
-        finalVideoUrl: null,
-        error_message: rpcError.message || "RPC error",
-      });
-      return;
-    }
+        // 1) Try RPC get_render_job_status(job_id)
+        const { data: rpcData, error: rpcError } = await supabase.rpc("get_render_job_status", {
+          job_id: jobId,
+        });
 
-    // RPC შეიძლება აბრუნებდეს array-ს ან object-ს — გავამაგროთ
-    const row = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+        if (!rpcError) {
+          row = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+        } else {
+          // 2) Fallback: direct table read (if RLS allows)
+          const { data: tData, error: tErr } = await supabase
+            .from("render_jobs")
+            .select("id,status,error_message,result,updated_at,created_at")
+            .eq("id", jobId)
+            .single();
 
-    const status = normalizeJobStatus(row?.status);
-    const finalVideoUrl = (row?.final_video_url ?? row?.finalVideoUrl ?? null) as string | null;
-    const error_message = (row?.error_message ?? null) as string | null;
+          if (tErr) {
+            setRenderStatus({
+              id: jobId,
+              status: "unknown",
+              finalVideoUrl: null,
+              error_message: rpcError.message || tErr.message || "Unable to fetch render job",
+            });
+            return;
+          }
+          row = tData;
+        }
 
-    setRenderStatus({
-      id: jobId,
-      status,
-      finalVideoUrl: finalVideoUrl ? String(finalVideoUrl) : null,
-      error_message: error_message ? String(error_message) : null,
-    });
+        if (!row) {
+          setRenderStatus({
+            id: jobId,
+            status: "not_found",
+            finalVideoUrl: null,
+            error_message: "Job not found",
+          });
+          stopPolling();
+          return;
+        }
 
-    if (status === "completed" || status === "error" || status === "not_found") {
+        const status = normalizeJobStatus(row.status);
+        const finalUrl = extractFinalUrlFromRow(row);
+        const error_message = row.error_message ? String(row.error_message) : null;
+
+        setRenderStatus({
+          id: jobId,
+          status,
+          finalVideoUrl: finalUrl,
+          error_message,
+        });
+
+        if (isTerminalStatus(status)) stopPolling();
+      } catch (e: any) {
+        setRenderStatus({
+          id: jobId,
+          status: "unknown",
+          finalVideoUrl: null,
+          error_message: e?.message || "Unknown polling error",
+        });
+        stopPolling();
+      } finally {
+        inFlightRef.current = false;
+      }
+    },
+    [supabase, stopPolling]
+  );
+
+  const startPolling = useCallback(
+    (jobId: string) => {
       stopPolling();
-    }
-  }
+      setRenderPolling(true);
 
-  function startPolling(jobId: string) {
-    stopPolling();
-    setRenderPolling(true);
-
-    // immediate fetch
-    fetchRenderJobStatus(jobId);
-
-    pollerRef.current = window.setInterval(() => {
       fetchRenderJobStatus(jobId);
-    }, 3000);
-  }
+
+      pollerRef.current = window.setInterval(() => {
+        fetchRenderJobStatus(jobId);
+      }, 3000);
+    },
+    [fetchRenderJobStatus, stopPolling]
+  );
 
   useEffect(() => {
-    // cleanup on unmount
     return () => stopPolling();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [stopPolling]);
 
   async function onGenerate() {
     setError("");
@@ -310,7 +412,6 @@ export default function VideoDashboard() {
       const json = (await res.json()) as PentagonOutput;
       setData(json);
 
-      // ✅ if backend returned renderJobId, start polling
       const jobId = (json.renderJobId || "").trim();
       if (jobId) {
         setRenderJobId(jobId);
@@ -327,13 +428,11 @@ export default function VideoDashboard() {
     setError("");
     if (!renderJobId) return;
 
-    const supabase = getSupabaseClient();
     if (!supabase) {
       setError("Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY.");
       return;
     }
 
-    // ✅ RPC: public.retry_render_job(uuid)
     const { error: rpcError } = await supabase.rpc("retry_render_job", {
       job_id: renderJobId,
     });
@@ -343,7 +442,6 @@ export default function VideoDashboard() {
       return;
     }
 
-    // reset local status & resume polling
     setRenderStatus({
       id: renderJobId,
       status: "queued",
@@ -354,19 +452,24 @@ export default function VideoDashboard() {
     startPolling(renderJobId);
   }
 
-  // ✅ render progress steps
   const renderStep = useMemo(() => {
-    // If no job id: only pipeline exists
     if (!renderJobId) return 0;
-
     const s = renderStatus?.status || "unknown";
+
     if (s === "queued") return 2;
     if (s === "processing") return 3;
     if (s === "finalizing") return 4;
-    if (s === "completed") return 5;
-    if (s === "error") return 99;
+    if (s === "completed" || s === "done") return 5;
+    if (s === "error" || s === "failed") return 99;
     return 1;
   }, [renderJobId, renderStatus]);
+
+  const workerBadgeClass = useMemo(() => {
+    const s = renderStatus?.status || "unknown";
+    if (isSuccessStatus(s)) return "border-green-400/30 text-green-200 bg-green-400/10";
+    if (isFailStatus(s)) return "border-red-400/30 text-red-200 bg-red-400/10";
+    return "border-cyan-400/30 text-cyan-200 bg-cyan-400/10";
+  }, [renderStatus]);
 
   return (
     <section className="rounded-2xl border border-white/10 bg-white/5 p-4 shadow-[0_0_80px_rgba(90,30,255,0.15)] backdrop-blur">
@@ -384,6 +487,7 @@ export default function VideoDashboard() {
             )}
             placeholder="Write what you want the pipeline to generate…"
           />
+
           <div className="mt-2 flex flex-wrap gap-2 text-xs text-white/70">
             <div className="flex items-center gap-2">
               <span>Max Scenes</span>
@@ -392,10 +496,13 @@ export default function VideoDashboard() {
                 min={1}
                 max={10}
                 value={maxScenes}
-                onChange={(e) => setMaxScenes(Math.max(1, Math.min(10, Number(e.target.value) || 1)))}
+                onChange={(e) =>
+                  setMaxScenes(Math.max(1, Math.min(10, Number(e.target.value) || 1)))
+                }
                 className="w-20 rounded-lg border border-white/10 bg-black/30 px-2 py-1 outline-none"
               />
             </div>
+
             <div className="flex items-center gap-2">
               <span>Max Duration (sec)</span>
               <input
@@ -403,7 +510,9 @@ export default function VideoDashboard() {
                 min={6}
                 max={120}
                 value={maxDurationSec}
-                onChange={(e) => setMaxDurationSec(Math.max(6, Math.min(120, Number(e.target.value) || 15)))}
+                onChange={(e) =>
+                  setMaxDurationSec(Math.max(6, Math.min(120, Number(e.target.value) || 15)))
+                }
                 className="w-24 rounded-lg border border-white/10 bg-black/30 px-2 py-1 outline-none"
               />
             </div>
@@ -476,26 +585,18 @@ export default function VideoDashboard() {
       </div>
 
       {/* ✅ Render Worker Progress */}
-      {data?.renderJobId ? (
+      {renderJobId ? (
         <div className="mt-6 rounded-2xl border border-white/10 bg-black/25 p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <div className="text-xs text-white/60">Render Worker</div>
               <div className="text-sm text-white/85">
                 Job: <span className="text-white/70">{renderJobId}</span>
+                {renderPolling ? <span className="text-white/50"> • polling 3s</span> : null}
               </div>
             </div>
 
-            <div
-              className={cn(
-                "rounded-full px-3 py-1 text-[11px] border",
-                renderStatus?.status === "completed"
-                  ? "border-green-400/30 text-green-200 bg-green-400/10"
-                  : renderStatus?.status === "error"
-                  ? "border-red-400/30 text-red-200 bg-red-400/10"
-                  : "border-cyan-400/30 text-cyan-200 bg-cyan-400/10"
-              )}
-            >
+            <div className={cn("rounded-full px-3 py-1 text-[11px] border", workerBadgeClass)}>
               {statusLabel(renderStatus?.status || (renderPolling ? "processing" : "unknown"))}
             </div>
           </div>
@@ -511,6 +612,7 @@ export default function VideoDashboard() {
             ].map((x) => {
               const active = renderStep >= x.k && renderStep !== 99;
               const failed = renderStep === 99;
+
               return (
                 <div
                   key={x.k}
@@ -530,9 +632,10 @@ export default function VideoDashboard() {
           </div>
 
           {/* Error + Retry */}
-          {renderStatus?.status === "error" ? (
+          {renderStatus?.status && isFailStatus(renderStatus.status) ? (
             <div className="mt-4 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
               <div className="font-semibold">Render failed</div>
+
               {renderStatus.error_message ? (
                 <div className="mt-1 text-xs text-red-200/90">{renderStatus.error_message}</div>
               ) : null}
@@ -561,12 +664,13 @@ export default function VideoDashboard() {
               <div className="text-xl font-semibold">{data.localized?.title_ka || "—"}</div>
               <div className="text-sm text-white/75">{data.localized?.logline_ka || ""}</div>
 
-              {/* ✅ final MP4 */}
+              {/* ✅ Final MP4 */}
               {finalMp4Url ? (
                 <div className="mt-3">
                   <div className="mb-2 text-xs text-white/60">
-                    {renderStatus?.finalVideoUrl ? "Final Render (Worker)" : "Preview (Pexels Fallback)"}
+                    {renderStatus?.finalVideoUrl ? "Final Render (Worker)" : "Preview (Pipeline Fallback)"}
                   </div>
+
                   <video
                     className="w-full rounded-xl border border-white/10 bg-black/40"
                     src={finalMp4Url}
@@ -574,6 +678,28 @@ export default function VideoDashboard() {
                     playsInline
                     preload="metadata"
                   />
+
+                  <div className="mt-2 flex gap-3">
+                    <a
+                      href={finalMp4Url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-xs text-cyan-200/90 underline underline-offset-4"
+                    >
+                      Open video
+                    </a>
+                    <a
+                      href={finalMp4Url}
+                      download
+                      className="text-xs text-cyan-200/90 underline underline-offset-4"
+                    >
+                      Download MP4
+                    </a>
+                  </div>
+                </div>
+              ) : renderJobId ? (
+                <div className="mt-3 rounded-xl border border-white/10 bg-white/5 p-3 text-xs text-white/70">
+                  {statusLabel(renderStatus?.status || "queued")}
                 </div>
               ) : null}
             </div>
@@ -630,7 +756,7 @@ export default function VideoDashboard() {
 
                 {s.prompt ? (
                   <div className="mt-3 text-[11px] text-white/60">
-                    <span className="text-white/70">Pexels Query:</span> {s.prompt}
+                    <span className="text-white/70">Query:</span> {s.prompt}
                   </div>
                 ) : null}
               </div>
@@ -648,4 +774,4 @@ export default function VideoDashboard() {
       ) : null}
     </section>
   );
-      }
+          }
