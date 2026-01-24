@@ -1,61 +1,75 @@
-import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 function getSupabaseAdmin() {
   const url = process.env.SUPABASE_URL?.trim();
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
 
-  // ❗️არასდროს throw import-time-ზე — რომ build არ გატყდეს
-  if (!url || !key) return null;
+  // IMPORTANT: do NOT throw at module load time (prevents Vercel build errors)
+  if (!url || !serviceKey) return null;
 
-  return createClient(url, key, {
+  return createClient(url, serviceKey, {
     auth: { persistSession: false },
+    global: { fetch },
   });
 }
 
-function badRequest(msg: string) {
-  return NextResponse.json({ ok: false, error: msg }, { status: 400 });
-}
-
-export async function GET(req: Request) {
+export async function GET(
+  _req: Request,
+  { params }: { params: { jobId: string } }
+) {
   const supabase = getSupabaseAdmin();
   if (!supabase) {
     return NextResponse.json(
-      { ok: false, error: 'SUPABASE_URL ან SUPABASE_SERVICE_ROLE_KEY არ არის დაყენებული backend env-ში.' },
-      { status: 500 }
+      { success: false, error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY" },
+      { status: 500, headers: { "Cache-Control": "no-store" } }
     );
   }
 
-  const { searchParams } = new URL(req.url);
-  const jobId = searchParams.get('jobId') || searchParams.get('renderJobId');
-
-  if (!jobId) return badRequest('jobId is required. Example: /api/render-status?jobId=job_123');
+  const jobId = params?.jobId;
+  if (!jobId) {
+    return NextResponse.json(
+      { success: false, error: "jobId is required" },
+      { status: 400, headers: { "Cache-Control": "no-store" } }
+    );
+  }
 
   const { data, error } = await supabase
-    .from('render_jobs')
-    .select('id,status,progress,final_video_url,error,created_at,updated_at')
-    .eq('id', jobId)
+    .from("render_jobs")
+    .select("id,status,progress,result_url,error_message,created_at,updated_at")
+    .eq("id", jobId)
     .maybeSingle();
 
   if (error) {
-    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    return NextResponse.json(
+      { success: false, error: error.message },
+      { status: 500, headers: { "Cache-Control": "no-store" } }
+    );
   }
 
   if (!data) {
-    return NextResponse.json({ ok: false, error: 'Job not found', renderJobId: jobId }, { status: 404 });
+    return NextResponse.json(
+      { success: false, error: "Job not found", jobId },
+      { status: 404, headers: { "Cache-Control": "no-store" } }
+    );
   }
 
-  return NextResponse.json({
-    ok: true,
-    renderJobId: data.id,
-    status: data.status,
-    progress: data.progress,
-    finalVideoUrl: data.final_video_url || null,
-    error: data.error || null,
-    createdAt: data.created_at,
-    updatedAt: data.updated_at,
-  });
+  return NextResponse.json(
+    {
+      success: true,
+      job: {
+        id: data.id,
+        status: data.status,
+        progress: data.progress,
+        resultUrl: data.result_url,
+        errorMessage: data.error_message,
+        createdAt: data.created_at,
+        updatedAt: data.updated_at,
+      },
+    },
+    { headers: { "Cache-Control": "no-store" } }
+  );
 }
