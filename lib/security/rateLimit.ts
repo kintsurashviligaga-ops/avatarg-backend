@@ -1,5 +1,5 @@
 import { logStructured } from '@/lib/logging/logger';
-import { RedisMisconfiguredError, redisPipeline, redisPing } from '@/lib/redis';
+import { RedisMisconfiguredError, RedisUnavailableError, redisPipeline, redisPing } from '@/lib/redis';
 
 type LimitResult = {
   ok: boolean;
@@ -58,7 +58,7 @@ async function upstashLimit(key: string, limit: number, windowSec: number): Prom
       { strict }
     );
   } catch (error) {
-    if (error instanceof RedisMisconfiguredError) {
+    if (error instanceof RedisMisconfiguredError || error instanceof RedisUnavailableError) {
       throw error;
     }
 
@@ -70,6 +70,10 @@ async function upstashLimit(key: string, limit: number, windowSec: number): Prom
   }
 
   if (!payload) {
+    if (strict) {
+      throw new RedisUnavailableError('redis_disabled_in_production');
+    }
+
     if (!warnedFallback) {
       warnedFallback = true;
       logStructured('warn', 'rate_limit.memory_fallback', { event: 'rate_limiter_fallback' });

@@ -10,6 +10,13 @@ export class RedisMisconfiguredError extends Error {
   }
 }
 
+export class RedisUnavailableError extends Error {
+  constructor(message = 'redis_unreachable') {
+    super(message);
+    this.name = 'RedisUnavailableError';
+  }
+}
+
 type RedisCommand = Array<string | number>;
 
 type RedisConfig = {
@@ -17,18 +24,39 @@ type RedisConfig = {
   token: string;
 };
 
+type RedisSingleton = {
+  initialized: boolean;
+  config: RedisConfig | null;
+};
+
+const singleton: RedisSingleton = {
+  initialized: false,
+  config: null,
+};
+
 function readRedisConfig(strict: boolean): RedisConfig | null {
+  if (singleton.initialized) {
+    if (strict && !singleton.config) {
+      throw new RedisMisconfiguredError(['UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN']);
+    }
+    return singleton.config;
+  }
+
   try {
     const values = requireRuntimeEnv(['UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN']);
-    return {
+    singleton.config = {
       url: values.UPSTASH_REDIS_REST_URL.replace(/\/$/, ''),
       token: values.UPSTASH_REDIS_REST_TOKEN,
     };
+    singleton.initialized = true;
+    return singleton.config;
   } catch (error) {
     if (error instanceof EnvValidationError) {
       if (strict) {
         throw new RedisMisconfiguredError(error.missing);
       }
+      singleton.config = null;
+      singleton.initialized = true;
       return null;
     }
 
@@ -36,24 +64,24 @@ function readRedisConfig(strict: boolean): RedisConfig | null {
   }
 }
 
-async function withRetry<T>(fn: () => Promise<T>, retries = 2, baseDelayMs = 120): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3, baseDelayMs = 120): Promise<T> {
   let lastError: unknown;
 
-  for (let attempt = 0; attempt <= retries; attempt += 1) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
       return await fn();
     } catch (error) {
       lastError = error;
-      if (attempt === retries) {
+      if (attempt === maxAttempts - 1) {
         break;
       }
 
-      const delay = baseDelayMs * (attempt + 1);
+      const delay = baseDelayMs * 2 ** attempt;
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
 
-  throw lastError instanceof Error ? lastError : new Error('redis_request_failed');
+  throw new RedisUnavailableError(lastError instanceof Error ? lastError.message : 'redis_request_failed');
 }
 
 export async function redisPipeline(commands: RedisCommand[], options: { strict: boolean }): Promise<Array<{ result?: unknown }> | null> {
@@ -74,7 +102,7 @@ export async function redisPipeline(commands: RedisCommand[], options: { strict:
     });
 
     if (!res.ok) {
-      throw new Error(`redis_http_${res.status}`);
+      throw new RedisUnavailableError(`redis_http_${res.status}`);
     }
 
     return res;
@@ -120,7 +148,7 @@ export async function redisPing(options: { strict: boolean }): Promise<{ ok: boo
       });
 
       if (!res.ok) {
-        throw new Error(`redis_ping_${res.status}`);
+        throw new RedisUnavailableError(`redis_ping_${res.status}`);
       }
 
       return res;
@@ -138,4 +166,8 @@ export async function redisPing(options: { strict: boolean }): Promise<{ ok: boo
       latencyMs: Date.now() - startedAt,
     };
   }
+}
+
+if (process.env.NODE_ENV === 'production') {
+  readRedisConfig(true);
 }

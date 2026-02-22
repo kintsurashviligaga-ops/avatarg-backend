@@ -82,6 +82,8 @@ Expected outcomes:
 
 ## 7) Vercel Env Reliability (Critical)
 
+Env variable changes require redeploy on Vercel.
+
 If Vercel says `variable already exists` / `No env variables were created`, it usually means the key already exists in that target environment.
 
 Use this sequence:

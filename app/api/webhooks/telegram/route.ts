@@ -8,7 +8,7 @@ import { recordFailureAndAlert } from '@/lib/monitoring/alerts';
 import { captureException } from '@/lib/monitoring/errorTracker';
 import { recordWebhookError, recordWebhookLatency, recordWebhookRequest } from '@/lib/monitoring/metrics';
 import { enforceRateLimit } from '@/lib/security/rateLimit';
-import { RedisMisconfiguredError } from '@/lib/redis';
+import { RedisMisconfiguredError, RedisUnavailableError } from '@/lib/redis';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -124,9 +124,14 @@ export async function POST(req: Request): Promise<Response> {
     });
   } catch (error) {
     if (error instanceof RedisMisconfiguredError) {
-      status = 500;
+      status = 503;
       recordWebhookError('telegram');
       return Response.json({ error: 'server_misconfigured', missing: error.missing }, { status, headers: corsHeaders() });
+    }
+    if (error instanceof RedisUnavailableError) {
+      status = 503;
+      recordWebhookError('telegram');
+      return Response.json({ error: 'redis_unavailable' }, { status, headers: corsHeaders() });
     }
     throw error;
   }

@@ -73,6 +73,7 @@ export function logStructured(level: LogLevel, event: string, meta: LogMeta = {}
   const payload = {
     level,
     timestamp: new Date().toISOString(),
+    message: event,
     event,
     ...sanitize(meta),
   };
