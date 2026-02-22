@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { assertRequiredEnv, getAllowedOrigin } from '@/lib/env';
+import { logStructured } from '@/lib/logger';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -16,7 +17,6 @@ const RATE_WINDOW_MS = 60_000;
 const RATE_MAX_REQUESTS = 120;
 const DEDUPE_TTL_MS = 10 * 60_000;
 const MAX_PAYLOAD_BYTES = 1_000_000;
-
 function corsHeaders(): HeadersInit {
   const allowedOrigin = getAllowedOrigin();
   const headers: Record<string, string> = {
@@ -115,7 +115,24 @@ function verifySignature(rawBody: string, signatureHeader: string | null): boole
   }
 
   const expected = createHmac('sha256', appSecret).update(rawBody, 'utf8').digest('hex');
+  if (received.length !== expected.length) {
+    return false;
+  }
   return timingSafeEquals(received, expected);
+}
+
+function isAllowedOrigin(req: Request): boolean {
+  const requestOrigin = String(req.headers.get('origin') || '').trim();
+  if (!requestOrigin) {
+    return true;
+  }
+
+  const allowedOrigin = getAllowedOrigin();
+  if (!allowedOrigin) {
+    return true;
+  }
+
+  return requestOrigin === allowedOrigin;
 }
 
 function sweepDedupeCache(now: number): void {
@@ -205,6 +222,11 @@ export async function GET(req: Request): Promise<Response> {
     });
   }
 
+  logStructured('warn', 'whatsapp.verify_failed', {
+    mode,
+    hasToken: Boolean(token),
+  });
+
   return new Response('Forbidden', {
     status: 403,
     headers: {
@@ -246,9 +268,28 @@ function processPayloadSafely(payload: unknown): void {
 }
 
 export async function POST(req: Request): Promise<Response> {
+  const requestId = crypto.randomUUID();
+
+  if (!isAllowedOrigin(req)) {
+    logStructured('warn', 'whatsapp.origin_rejected', {
+      requestId,
+      origin: req.headers.get('origin'),
+    });
+    return new Response('Forbidden', {
+      status: 403,
+      headers: {
+        'Content-Type': 'text/plain',
+        ...corsHeaders(),
+      },
+    });
+  }
+
   const rateLimit = enforceRateLimit(req);
   if (!rateLimit.ok) {
-    logDebug('rate_limit_blocked', { retryAfterSec: rateLimit.retryAfterSec });
+    logStructured('warn', 'whatsapp.rate_limited', {
+      requestId,
+      retryAfterSec: rateLimit.retryAfterSec,
+    });
     return Response.json(
       { ok: false, error: 'rate_limited' },
       {
@@ -263,6 +304,10 @@ export async function POST(req: Request): Promise<Response> {
 
   const rawBody = await req.text();
   if (rawBody.length > MAX_PAYLOAD_BYTES) {
+    logStructured('warn', 'whatsapp.payload_too_large', {
+      requestId,
+      payloadBytes: rawBody.length,
+    });
     return Response.json(
       { ok: false, error: 'payload_too_large' },
       {
@@ -274,7 +319,10 @@ export async function POST(req: Request): Promise<Response> {
 
   const signature = req.headers.get('x-hub-signature-256');
   if (!verifySignature(rawBody, signature)) {
-    logDebug('signature_verification_failed');
+    logStructured('warn', 'whatsapp.signature_invalid', {
+      requestId,
+      hasSignature: Boolean(signature),
+    });
     return new Response('Forbidden', {
       status: 403,
       headers: {
@@ -288,7 +336,8 @@ export async function POST(req: Request): Promise<Response> {
   try {
     payload = rawBody ? JSON.parse(rawBody) : null;
   } catch {
-    payload = null;
+    logStructured('warn', 'whatsapp.invalid_json', { requestId });
+    return Response.json({ ok: true }, { status: 200, headers: corsHeaders() });
   }
 
   const contentLength = Number(req.headers.get('content-length') || '0');

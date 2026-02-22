@@ -9,6 +9,11 @@
     "esModuleInterop": true,
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./*"]
+    },
+    "types": ["node"],
     "resolveJsonModule": true,
     "isolatedModules": true,
     "jsx": "preserve",
