@@ -2,16 +2,24 @@ import '@/lib/bootstrap';
 import { resolveApiKeyAuth } from '@/lib/auth/apiKeyAuth';
 import { getPriceIdForTier, getStripeClient } from '@/lib/billing/stripe';
 import { parsePlanTier } from '@/lib/config/plans';
+import { logStructured } from '@/lib/logging/logger';
 import { getRequestId, jsonHeadersWithRequestId } from '@/lib/logging/request';
+import { buildRateLimitHeaders, enforceTierRateLimit } from '@/lib/security/tierRateLimit';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function POST(req: Request): Promise<Response> {
   const requestId = getRequestId(req);
+  const startedAt = Date.now();
   const auth = await resolveApiKeyAuth(req);
   if (!auth) {
     return Response.json({ ok: false, error: 'unauthorized' }, { status: 401, headers: jsonHeadersWithRequestId(requestId) });
+  }
+
+  const limit = await enforceTierRateLimit({ userId: auth.userId, tier: auth.tier, routeGroup: 'billing_api' });
+  if (!limit.ok) {
+    return Response.json({ ok: false, error: 'rate_limited' }, { status: 429, headers: jsonHeadersWithRequestId(requestId, buildRateLimitHeaders(limit)) });
   }
 
   const body = (await req.json().catch(() => null)) as { tier?: string; successUrl?: string; cancelUrl?: string } | null;
@@ -40,12 +48,21 @@ export async function POST(req: Request): Promise<Response> {
     },
   });
 
+  logStructured('info', 'billing.checkout.created', {
+    requestId,
+    route: '/api/billing/create-checkout-session',
+    status: 200,
+    latencyMs: Date.now() - startedAt,
+    tier: auth.tier,
+    targetTier: tier,
+  });
+
   return Response.json(
     {
       ok: true,
       id: session.id,
       url: session.url,
     },
-    { status: 200, headers: jsonHeadersWithRequestId(requestId) }
+    { status: 200, headers: jsonHeadersWithRequestId(requestId, buildRateLimitHeaders(limit)) }
   );
 }

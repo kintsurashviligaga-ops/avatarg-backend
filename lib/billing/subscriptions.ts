@@ -89,7 +89,11 @@ export async function findUserIdByStripeCustomerId(customerId: string): Promise<
 }
 
 export async function claimStripeWebhookEventId(eventId: string): Promise<boolean> {
-  const key = `idemp:stripe:webhook:${eventId}`;
+  const key = stripeWebhookIdempotencyKey(eventId);
   const result = await redisSetNxWithTtl(key, '1', 60 * 60 * 24 * 7, { strict: false });
   return Boolean(result.value);
+}
+
+export function stripeWebhookIdempotencyKey(eventId: string): string {
+  return `idemp:stripe:webhook:${eventId}`;
 }

@@ -61,7 +61,7 @@ export async function enforceTierRateLimit(input: {
   windowSec?: number;
 }): Promise<RateLimitResult> {
   const windowSec = Math.max(1, input.windowSec || 60);
-  const limit = getPlanDefinition(input.tier).rateLimitPerMinute[input.routeGroup];
+  const limit = getTierRouteLimit(input.tier, input.routeGroup);
   const key = `rl:tier:${input.routeGroup}:${input.tier}:${input.userId}`;
 
   try {
@@ -92,6 +92,10 @@ export async function enforceTierRateLimit(input: {
   } catch {
     return memoryLimit(key, limit, windowSec);
   }
+}
+
+export function getTierRouteLimit(tier: PlanTier, routeGroup: RouteGroup): number {
+  return getPlanDefinition(tier).rateLimitPerMinute[routeGroup];
 }
 
 export function buildRateLimitHeaders(result: RateLimitResult): Record<string, string> {

@@ -103,18 +103,21 @@ export class UsageLimitExceededError extends Error {
 
 export async function enforceUsageOrThrow(userId: string, tier: PlanTier, metric: UsageMetric): Promise<void> {
   const usage = await getUsage(userId);
-  const plan = getPlanDefinition(tier);
+  const limit = getLimitForMetric(tier, metric);
 
-  const limit = metric === 'messages'
+  const used = usage.metrics[metric];
+  if (used >= limit) {
+    throw new UsageLimitExceededError(metric, limit, used);
+  }
+}
+
+export function getLimitForMetric(tier: PlanTier, metric: UsageMetric): number {
+  const plan = getPlanDefinition(tier);
+  return metric === 'messages'
     ? plan.limits.monthlyMessages
     : metric === 'ai_calls'
       ? plan.limits.dailyAiCalls
       : metric === 'tokens'
         ? plan.limits.monthlyTokens
         : plan.limits.monthlyJobMinutes;
-
-  const used = usage.metrics[metric];
-  if (used >= limit) {
-    throw new UsageLimitExceededError(metric, limit, used);
-  }
 }

@@ -2,16 +2,24 @@ import '@/lib/bootstrap';
 import { resolveApiKeyAuth } from '@/lib/auth/apiKeyAuth';
 import { getSubscriptionState } from '@/lib/billing/subscriptions';
 import { getStripeClient } from '@/lib/billing/stripe';
+import { logStructured } from '@/lib/logging/logger';
 import { getRequestId, jsonHeadersWithRequestId } from '@/lib/logging/request';
+import { buildRateLimitHeaders, enforceTierRateLimit } from '@/lib/security/tierRateLimit';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function POST(req: Request): Promise<Response> {
   const requestId = getRequestId(req);
+  const startedAt = Date.now();
   const auth = await resolveApiKeyAuth(req);
   if (!auth) {
     return Response.json({ ok: false, error: 'unauthorized' }, { status: 401, headers: jsonHeadersWithRequestId(requestId) });
+  }
+
+  const limit = await enforceTierRateLimit({ userId: auth.userId, tier: auth.tier, routeGroup: 'billing_api' });
+  if (!limit.ok) {
+    return Response.json({ ok: false, error: 'rate_limited' }, { status: 429, headers: jsonHeadersWithRequestId(requestId, buildRateLimitHeaders(limit)) });
   }
 
   const returnUrl = String(process.env.BILLING_PORTAL_RETURN_URL || '').trim();
@@ -30,5 +38,13 @@ export async function POST(req: Request): Promise<Response> {
     return_url: returnUrl,
   });
 
-  return Response.json({ ok: true, url: portal.url }, { status: 200, headers: jsonHeadersWithRequestId(requestId) });
+  logStructured('info', 'billing.portal.created', {
+    requestId,
+    route: '/api/billing/create-portal-session',
+    status: 200,
+    latencyMs: Date.now() - startedAt,
+    tier: auth.tier,
+  });
+
+  return Response.json({ ok: true, url: portal.url }, { status: 200, headers: jsonHeadersWithRequestId(requestId, buildRateLimitHeaders(limit)) });
 }

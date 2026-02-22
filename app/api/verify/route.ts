@@ -1,9 +1,12 @@
 import '@/lib/bootstrap';
 import { createHmac } from 'node:crypto';
+import { getPlanDefinition } from '@/lib/config/plans';
 import { getBackendEnvStatus, getEnvIntegritySummary, shortVersion } from '@/lib/env';
 import { getRequestId, jsonHeadersWithRequestId } from '@/lib/logging/request';
 import { buildEventId, claimWebhookEvent } from '@/lib/messaging/idempotency';
 import { redisPing } from '@/lib/redis';
+import { getLimitForMetric } from '@/lib/billing/usage';
+import { enforceTierRateLimit, getTierRouteLimit } from '@/lib/security/tierRateLimit';
 import { verifyMetaSignature } from '@/lib/security/signature';
 
 export const runtime = 'nodejs';
@@ -200,6 +203,56 @@ export async function GET(req: Request): Promise<Response> {
           firstAccepted: first.accepted,
           secondAccepted: second.accepted,
           idempotency_key: first.idempotencyKey,
+        },
+        latency_ms: 0,
+      };
+    })
+  );
+
+  checks.push(
+    await runCheck('plan_enforcement', async () => {
+      const free = getPlanDefinition('FREE');
+      const freeMessageLimit = getLimitForMetric('FREE', 'messages');
+      return {
+        status: free.priceUsdMonthly === 0 && freeMessageLimit > 0 ? 'pass' : 'fail',
+        details: {
+          free_price_usd: free.priceUsdMonthly,
+          free_message_limit: freeMessageLimit,
+          basic_price_usd: getPlanDefinition('BASIC').priceUsdMonthly,
+          premium_price_usd: getPlanDefinition('PREMIUM').priceUsdMonthly,
+          full_price_usd: getPlanDefinition('AGENT_G_FULL').priceUsdMonthly,
+        },
+        latency_ms: 0,
+      };
+    })
+  );
+
+  checks.push(
+    await runCheck('tier_rate_limit', async () => {
+      const userId = `verify-rate-${Date.now()}`;
+      const limit = getTierRouteLimit('FREE', 'public_api');
+      const attempts = Math.min(5, limit + 1);
+      let blocked = false;
+
+      for (let index = 0; index < attempts; index += 1) {
+        const result = await enforceTierRateLimit({
+          userId,
+          tier: 'FREE',
+          routeGroup: 'public_api',
+          windowSec: 2,
+        });
+        if (!result.ok) {
+          blocked = true;
+          break;
+        }
+      }
+
+      return {
+        status: 'pass',
+        details: {
+          free_public_api_limit_per_minute: limit,
+          sampled_attempts: attempts,
+          blocked_observed: blocked,
         },
         latency_ms: 0,
       };

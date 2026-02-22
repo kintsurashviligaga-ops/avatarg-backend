@@ -13,6 +13,8 @@
     "smoke:health:prod": "node scripts/smoke-health-prod.mjs",
     "smoke:webhook:whatsapp": "node scripts/smoke-webhook-whatsapp.mjs",
     "smoke:webhook:telegram": "node scripts/smoke-webhook-telegram.mjs"
+    ,"test:platform": "tsx --test tests/platform/*.test.ts"
+    ,"verify:matrix": "node scripts/production-verification-matrix.mjs"
   },
   "dependencies": {
     "stripe": "^18.0.0",
@@ -24,6 +26,7 @@
   "devDependencies": {
     "@types/node": "^24.3.0",
     "@types/react": "19.2.14",
+    "tsx": "^4.20.4",
     "typescript": "^5.6.3"
   }
 }
