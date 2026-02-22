@@ -18,6 +18,10 @@ function redisKey(userId: string): string {
   return `billing:sub:${userId}`;
 }
 
+function customerMapKey(customerId: string): string {
+  return `billing:customer:${customerId}`;
+}
+
 function parseState(raw: string | null, fallbackUserId: string): SubscriptionState {
   if (!raw) {
     return {
@@ -65,9 +69,23 @@ export async function setSubscriptionState(state: SubscriptionState): Promise<vo
     [
       ['SET', key, payload],
       ['EXPIRE', key, 60 * 60 * 24 * 90],
+      ...(state.stripeCustomerId
+        ? [
+            ['SET', customerMapKey(state.stripeCustomerId), state.userId],
+            ['EXPIRE', customerMapKey(state.stripeCustomerId), 60 * 60 * 24 * 365],
+          ]
+        : []),
     ],
     { strict: false }
   );
+}
+
+export async function findUserIdByStripeCustomerId(customerId: string): Promise<string | null> {
+  const result = await redisGet(customerMapKey(customerId), { strict: false });
+  if (!result.ok || !result.enabled) {
+    return null;
+  }
+  return result.value || null;
 }
 
 export async function claimStripeWebhookEventId(eventId: string): Promise<boolean> {
