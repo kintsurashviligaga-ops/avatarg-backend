@@ -6,6 +6,7 @@ import { executeAiWithFallback } from '@/lib/ai/providers';
 import { routeAiRequest, type AiTaskType } from '@/lib/ai/router';
 import { logStructured } from '@/lib/logging/logger';
 import { getRequestId, jsonHeadersWithRequestId } from '@/lib/logging/request';
+import { recordAiCallMetric, recordApiErrorMetric } from '@/lib/monitoring/metrics';
 import { buildRateLimitHeaders, enforceTierRateLimit } from '@/lib/security/tierRateLimit';
 
 export const runtime = 'nodejs';
@@ -74,17 +75,24 @@ export async function POST(req: Request): Promise<Response> {
     }
   );
 
-  const aiResult = await executeAiWithFallback({
-    fallbackChain: route.fallbackChain,
-    messages,
-    maxTokens: route.maxTokens,
-    temperature: route.temperature,
-  });
+  let aiResult;
+  try {
+    aiResult = await executeAiWithFallback({
+      fallbackChain: route.fallbackChain,
+      messages,
+      maxTokens: route.maxTokens,
+      temperature: route.temperature,
+    });
+  } catch {
+    recordApiErrorMetric();
+    return Response.json({ ok: false, error: 'ai_unavailable' }, { status: 503, headers: jsonHeadersWithRequestId(requestId) });
+  }
 
   await Promise.all([
     incrementUsage(auth.userId, 'ai_calls', 1),
     incrementUsage(auth.userId, 'tokens', Math.max(1, aiResult.usageTokens)),
   ]);
+  recordAiCallMetric();
 
   const entitlements = await getEntitlements(auth.userId);
 

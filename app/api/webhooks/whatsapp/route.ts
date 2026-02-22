@@ -8,7 +8,7 @@ import { routeMessage } from '@/lib/messaging/router';
 import { getMemoryStore } from '@/lib/memory/store';
 import { recordFailureAndAlert } from '@/lib/monitoring/alerts';
 import { captureException } from '@/lib/monitoring/errorTracker';
-import { recordWebhookError, recordWebhookLatency, recordWebhookRequest } from '@/lib/monitoring/metrics';
+import { recordDedupeBlockMetric, recordWebhookError, recordWebhookLatency, recordWebhookRequest } from '@/lib/monitoring/metrics';
 import { enforceRateLimit } from '@/lib/security/rateLimit';
 import { verifyMetaSignature } from '@/lib/security/signature';
 import { RedisMisconfiguredError, RedisUnavailableError } from '@/lib/redis';
@@ -312,6 +312,7 @@ export async function POST(req: Request): Promise<Response> {
 
     if (!claim.accepted) {
       status = 200;
+      recordDedupeBlockMetric();
       return Response.json({ ok: true, duplicate: true, eventId }, { status, headers: corsHeaders() });
     }
 

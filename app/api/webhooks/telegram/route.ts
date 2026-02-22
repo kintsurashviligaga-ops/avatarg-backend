@@ -8,7 +8,7 @@ import { normalizeTelegram } from '@/lib/messaging/normalize';
 import { routeMessage } from '@/lib/messaging/router';
 import { recordFailureAndAlert } from '@/lib/monitoring/alerts';
 import { captureException } from '@/lib/monitoring/errorTracker';
-import { recordWebhookError, recordWebhookLatency, recordWebhookRequest } from '@/lib/monitoring/metrics';
+import { recordDedupeBlockMetric, recordWebhookError, recordWebhookLatency, recordWebhookRequest } from '@/lib/monitoring/metrics';
 import { enforceRateLimit } from '@/lib/security/rateLimit';
 import { RedisMisconfiguredError, RedisUnavailableError } from '@/lib/redis';
 
@@ -227,6 +227,7 @@ export async function POST(req: Request): Promise<Response> {
 
     if (claims.some((claim) => !claim.accepted)) {
       status = 200;
+      recordDedupeBlockMetric();
       return Response.json({ ok: true, duplicate: true, eventId }, { status, headers: corsHeaders() });
     }
 
