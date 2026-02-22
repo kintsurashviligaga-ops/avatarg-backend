@@ -7,6 +7,28 @@ type SendResult = {
   error?: string;
 };
 
+type FetchFn = typeof fetch;
+type LogFn = typeof logWhatsAppSend;
+
+let sendFetch: FetchFn = fetch;
+let sendLogger: LogFn = logWhatsAppSend;
+
+export function __setSendFetchForTests(fn: FetchFn): void {
+  sendFetch = fn;
+}
+
+export function __resetSendFetchForTests(): void {
+  sendFetch = fetch;
+}
+
+export function __setSendLoggerForTests(fn: LogFn): void {
+  sendLogger = fn;
+}
+
+export function __resetSendLoggerForTests(): void {
+  sendLogger = logWhatsAppSend;
+}
+
 function getRequiredEnv(name: 'WHATSAPP_ACCESS_TOKEN' | 'WHATSAPP_PHONE_NUMBER_ID'): string {
   const value = String(process.env[name] || '').trim();
   if (!value) {
@@ -33,7 +55,7 @@ export async function sendTextMessage(toWaId: string, text: string): Promise<Sen
   };
 
   try {
-    const response = await fetch(`https://graph.facebook.com/v21.0/${encodeURIComponent(phoneNumberId)}/messages`, {
+    const response = await sendFetch(`https://graph.facebook.com/v21.0/${encodeURIComponent(phoneNumberId)}/messages`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -46,7 +68,7 @@ export async function sendTextMessage(toWaId: string, text: string): Promise<Sen
     const data = (await response.json().catch(() => null)) as Record<string, unknown> | null;
     const ok = response.ok;
 
-    await logWhatsAppSend({
+    await sendLogger({
       waId: normalizedTo,
       payload,
       ok,
@@ -61,7 +83,7 @@ export async function sendTextMessage(toWaId: string, text: string): Promise<Sen
 
     return { ok: true, status: response.status, response: data };
   } catch (error) {
-    await logWhatsAppSend({
+    await sendLogger({
       waId: normalizedTo,
       payload,
       ok: false,
