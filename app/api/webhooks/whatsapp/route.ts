@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { assertRequiredEnv, getAllowedOrigin, getMissingEnvNames } from '@/lib/env';
 import { logStructured } from '@/lib/logging/logger';
+import { buildEventId, claimWebhookEvent } from '@/lib/messaging/idempotency';
 import { normalizeWhatsApp } from '@/lib/messaging/normalize';
 import { routeMessage } from '@/lib/messaging/router';
 import { getMemoryStore } from '@/lib/memory/store';
@@ -136,6 +137,8 @@ export async function POST(req: Request): Promise<Response> {
   const method = 'POST';
   const startedAt = Date.now();
   let status = 200;
+  let eventId = 'unknown';
+  let redisUsed = false;
 
   recordWebhookRequest('whatsapp');
 
@@ -291,26 +294,57 @@ export async function POST(req: Request): Promise<Response> {
 
   try {
     const messages = normalizeWhatsApp(payload);
-    const store = getMemoryStore();
+    eventId = buildEventId({
+      platform: 'whatsapp',
+      rawBody,
+      messageIds: messages.map((msg) => msg.messageId),
+    });
 
-    for (const msg of messages) {
-      await store.saveMessage(msg);
-      const decision = routeMessage(msg);
-      logStructured('info', 'message_routed', {
+    const claim = await claimWebhookEvent({
+      platform: 'whatsapp',
+      eventId,
+      requestId,
+    });
+
+    redisUsed = claim.redisUsed || rateLimit.source === 'upstash';
+
+    if (!claim.accepted) {
+      status = 200;
+      return Response.json({ ok: true, duplicate: true, eventId }, { status, headers: corsHeaders() });
+    }
+
+    const handoffStartedAt = Date.now();
+    queueMicrotask(async () => {
+      const store = getMemoryStore();
+      for (const msg of messages) {
+        await store.saveMessage(msg);
+        const decision = routeMessage(msg);
+        logStructured('info', 'message_routed', {
+          requestId,
+          route,
+          method,
+          status: 200,
+          platform: 'whatsapp',
+          from: msg.from,
+          chatId: msg.chatId,
+          messageId: msg.messageId,
+          agentName: decision.agentName,
+          action: decision.action,
+        });
+      }
+    });
+
+    if (handoffStartedAt - startedAt > 2000) {
+      logStructured('warn', 'webhook_handoff_delayed', {
         requestId,
-        route,
-        method,
-        status,
         platform: 'whatsapp',
-        from: msg.from,
-        chatId: msg.chatId,
-        messageId: msg.messageId,
-        agentName: decision.agentName,
-        action: decision.action,
+        eventId,
+        latencyMs: handoffStartedAt - startedAt,
+        redisUsed,
       });
     }
 
-    return Response.json({ ok: true, received: messages.length }, { status, headers: corsHeaders() });
+    return Response.json({ ok: true, enqueued: true, eventId }, { status, headers: corsHeaders() });
   } catch (error) {
     status = 500;
     recordWebhookError('whatsapp');
@@ -326,11 +360,13 @@ export async function POST(req: Request): Promise<Response> {
     recordWebhookLatency('whatsapp', latencyMs);
     logStructured('info', 'webhook_received', {
       requestId,
+      platform: 'whatsapp',
+      eventId,
+      latencyMs,
+      redisUsed,
       route,
       method,
       status,
-      latencyMs,
-      platform: 'whatsapp',
     });
   }
 }

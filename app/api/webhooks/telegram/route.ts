@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { getAllowedOrigin, getMissingEnvNames } from '@/lib/env';
 import { logStructured } from '@/lib/logging/logger';
 import { getMemoryStore } from '@/lib/memory/store';
+import { buildEventId, claimWebhookEvent } from '@/lib/messaging/idempotency';
 import { normalizeTelegram } from '@/lib/messaging/normalize';
 import { routeMessage } from '@/lib/messaging/router';
 import { recordFailureAndAlert } from '@/lib/monitoring/alerts';
@@ -91,6 +92,8 @@ export async function POST(req: Request): Promise<Response> {
   const method = 'POST';
   const startedAt = Date.now();
   let status = 200;
+  let eventId = 'unknown';
+  let redisUsed = false;
 
   recordWebhookRequest('telegram');
 
@@ -189,26 +192,63 @@ export async function POST(req: Request): Promise<Response> {
 
   try {
     const messages = normalizeTelegram(payload);
-    const store = getMemoryStore();
+    const fallbackUpdateId = (() => {
+      const root = payload as Record<string, unknown> | null;
+      return typeof root?.update_id === 'number' ? String(root.update_id) : undefined;
+    })();
 
-    for (const msg of messages) {
-      await store.saveMessage(msg);
-      const decision = routeMessage(msg);
-      logStructured('info', 'message_routed', {
+    eventId = buildEventId({
+      platform: 'telegram',
+      rawBody,
+      messageIds: messages.map((msg) => msg.messageId),
+      fallbackId: fallbackUpdateId,
+    });
+
+    const claim = await claimWebhookEvent({
+      platform: 'telegram',
+      eventId,
+      requestId,
+    });
+
+    redisUsed = claim.redisUsed || rateLimit.source === 'upstash';
+
+    if (!claim.accepted) {
+      status = 200;
+      return Response.json({ ok: true, duplicate: true, eventId }, { status, headers: corsHeaders() });
+    }
+
+    const handoffStartedAt = Date.now();
+    queueMicrotask(async () => {
+      const store = getMemoryStore();
+      for (const msg of messages) {
+        await store.saveMessage(msg);
+        const decision = routeMessage(msg);
+        logStructured('info', 'message_routed', {
+          requestId,
+          route,
+          method,
+          status: 200,
+          platform: 'telegram',
+          from: msg.from,
+          chatId: msg.chatId,
+          messageId: msg.messageId,
+          agentName: decision.agentName,
+          action: decision.action,
+        });
+      }
+    });
+
+    if (handoffStartedAt - startedAt > 2000) {
+      logStructured('warn', 'webhook_handoff_delayed', {
         requestId,
-        route,
-        method,
-        status,
         platform: 'telegram',
-        from: msg.from,
-        chatId: msg.chatId,
-        messageId: msg.messageId,
-        agentName: decision.agentName,
-        action: decision.action,
+        eventId,
+        latencyMs: handoffStartedAt - startedAt,
+        redisUsed,
       });
     }
 
-    return Response.json({ ok: true, received: messages.length }, { status, headers: corsHeaders() });
+    return Response.json({ ok: true, enqueued: true, eventId }, { status, headers: corsHeaders() });
   } catch (error) {
     status = 500;
     recordWebhookError('telegram');
@@ -224,11 +264,13 @@ export async function POST(req: Request): Promise<Response> {
     recordWebhookLatency('telegram', latencyMs);
     logStructured('info', 'webhook_received', {
       requestId,
+      platform: 'telegram',
+      eventId,
+      latencyMs,
+      redisUsed,
       route,
       method,
       status,
-      latencyMs,
-      platform: 'telegram',
     });
   }
 }
