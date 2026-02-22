@@ -1,3 +1,9 @@
+import { enqueueWhatsAppJob, persistWhatsAppEvents } from '@/lib/whatsapp/db';
+import { extractIncomingWhatsAppEvents } from '@/lib/whatsapp/normalize';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
 export async function GET(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const mode = url.searchParams.get('hub.mode');
@@ -17,6 +23,45 @@ export async function GET(req: Request): Promise<Response> {
   });
 }
 
-export async function POST(): Promise<Response> {
+async function handleWebhookPayload(payload: unknown): Promise<void> {
+  const events = extractIncomingWhatsAppEvents(payload);
+  if (!events.length) {
+    return;
+  }
+
+  await persistWhatsAppEvents(events, payload);
+
+  for (const event of events) {
+    if (event.eventType !== 'message') {
+      continue;
+    }
+
+    await enqueueWhatsAppJob({
+      waId: event.waId,
+      messageId: event.messageId,
+      textIn: event.text,
+    });
+  }
+}
+
+export async function POST(req: Request): Promise<Response> {
+  let payload: unknown = null;
+
+  try {
+    payload = await req.json();
+  } catch {
+    payload = null;
+  }
+
+  console.info('[WhatsApp.Webhook] inbound', {
+    hasPayload: Boolean(payload),
+  });
+
+  void handleWebhookPayload(payload).catch((error) => {
+    console.error('[WhatsApp.Webhook] async handling failed', {
+      message: error instanceof Error ? error.message : 'unknown',
+    });
+  });
+
   return Response.json({ ok: true }, { status: 200 });
 }
