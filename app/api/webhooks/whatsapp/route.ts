@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { assertRequiredEnv, getAllowedOrigin } from '@/lib/env';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -15,6 +16,23 @@ const RATE_WINDOW_MS = 60_000;
 const RATE_MAX_REQUESTS = 120;
 const DEDUPE_TTL_MS = 10 * 60_000;
 const MAX_PAYLOAD_BYTES = 1_000_000;
+
+function corsHeaders(): HeadersInit {
+  const allowedOrigin = getAllowedOrigin();
+  const headers: Record<string, string> = {
+    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, X-Hub-Signature-256, Authorization',
+  };
+
+  if (allowedOrigin) {
+    headers['Access-Control-Allow-Origin'] = allowedOrigin;
+    headers['Vary'] = 'Origin';
+  } else {
+    headers['Access-Control-Allow-Origin'] = '*';
+  }
+
+  return headers;
+}
 
 function debugEnabled(): boolean {
   return String(process.env.WHATSAPP_DEBUG || '').trim().toLowerCase() === 'true';
@@ -154,19 +172,68 @@ export async function GET(req: Request): Promise<Response> {
   const mode = url.searchParams.get('hub.mode');
   const token = url.searchParams.get('hub.verify_token');
   const challenge = url.searchParams.get('hub.challenge');
-  const expectedToken = String(process.env.WHATSAPP_VERIFY_TOKEN || '');
+  let expectedToken = '';
+
+  try {
+    expectedToken = assertRequiredEnv('WHATSAPP_VERIFY_TOKEN');
+  } catch {
+    return new Response('Server Misconfigured', {
+      status: 500,
+      headers: {
+        'Content-Type': 'text/plain',
+        ...corsHeaders(),
+      },
+    });
+  }
 
   if (mode === 'subscribe' && token && expectedToken && timingSafeEquals(token, expectedToken)) {
     return new Response(challenge ?? '', {
       status: 200,
-      headers: { 'Content-Type': 'text/plain' },
+      headers: {
+        'Content-Type': 'text/plain',
+        ...corsHeaders(),
+      },
     });
   }
 
   return new Response('Forbidden', {
     status: 403,
-    headers: { 'Content-Type': 'text/plain' },
+    headers: {
+      'Content-Type': 'text/plain',
+      ...corsHeaders(),
+    },
   });
+}
+
+export async function OPTIONS(): Promise<Response> {
+  return new Response(null, {
+    status: 204,
+    headers: corsHeaders(),
+  });
+}
+
+function processPayloadSafely(payload: unknown): void {
+  try {
+    const now = Date.now();
+    sweepDedupeCache(now);
+
+    const messageIds = collectMessageIds(payload);
+    const isDuplicate = hasRecentDuplicate(messageIds, now);
+    if (!isDuplicate) {
+      rememberMessageIds(messageIds, now);
+    }
+
+    logDebug('payload_processed', {
+      timestamp: new Date(now).toISOString(),
+      messageCount: messageIds.length,
+      messageIds,
+      isDuplicate,
+    });
+  } catch (error) {
+    console.error('[WhatsApp.Webhook] process_failed', {
+      message: error instanceof Error ? error.message : 'unknown',
+    });
+  }
 }
 
 export async function POST(req: Request): Promise<Response> {
@@ -179,6 +246,7 @@ export async function POST(req: Request): Promise<Response> {
         status: 429,
         headers: {
           'Retry-After': String(rateLimit.retryAfterSec),
+          ...corsHeaders(),
         },
       }
     );
@@ -186,7 +254,13 @@ export async function POST(req: Request): Promise<Response> {
 
   const rawBody = await req.text();
   if (rawBody.length > MAX_PAYLOAD_BYTES) {
-    return Response.json({ ok: false, error: 'payload_too_large' }, { status: 413 });
+    return Response.json(
+      { ok: false, error: 'payload_too_large' },
+      {
+        status: 413,
+        headers: corsHeaders(),
+      }
+    );
   }
 
   const signature = req.headers.get('x-hub-signature-256');
@@ -194,7 +268,10 @@ export async function POST(req: Request): Promise<Response> {
     logDebug('signature_verification_failed');
     return new Response('Forbidden', {
       status: 403,
-      headers: { 'Content-Type': 'text/plain' },
+      headers: {
+        'Content-Type': 'text/plain',
+        ...corsHeaders(),
+      },
     });
   }
 
@@ -205,20 +282,20 @@ export async function POST(req: Request): Promise<Response> {
     payload = null;
   }
 
-  const now = Date.now();
-  sweepDedupeCache(now);
-
-  const messageIds = collectMessageIds(payload);
-  const isDuplicate = hasRecentDuplicate(messageIds, now);
-  if (!isDuplicate) {
-    rememberMessageIds(messageIds, now);
-  }
-
+  const contentLength = Number(req.headers.get('content-length') || '0');
   logDebug('inbound', {
+    timestamp: new Date().toISOString(),
     hasPayload: Boolean(payload),
-    messageCount: messageIds.length,
-    isDuplicate,
+    contentLength,
   });
 
-  return Response.json({ ok: true }, { status: 200 });
+  queueMicrotask(() => processPayloadSafely(payload));
+
+  return Response.json(
+    { ok: true },
+    {
+      status: 200,
+      headers: corsHeaders(),
+    }
+  );
 }
