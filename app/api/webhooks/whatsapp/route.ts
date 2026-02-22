@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { assertRequiredEnv, getAllowedOrigin } from '@/lib/env';
+import { assertRequiredEnv, getAllowedOrigin, getMissingEnvNames } from '@/lib/env';
 import { logStructured } from '@/lib/logging/logger';
 import { normalizeWhatsApp } from '@/lib/messaging/normalize';
 import { routeMessage } from '@/lib/messaging/router';
@@ -80,18 +80,21 @@ export async function GET(req: Request): Promise<Response> {
   const token = url.searchParams.get('hub.verify_token');
   const challenge = url.searchParams.get('hub.challenge');
 
-  let expectedToken = '';
-  try {
-    expectedToken = getRequiredVerifyToken();
-  } catch {
-    return new Response('Server Misconfigured', {
-      status: 500,
-      headers: {
-        'Content-Type': 'text/plain',
-        ...corsHeaders(),
+  const missing = getMissingEnvNames(['WHATSAPP_VERIFY_TOKEN']);
+  if (missing.length > 0) {
+    return Response.json(
+      {
+        error: 'server_misconfigured',
+        missing,
       },
-    });
+      {
+        status: 500,
+        headers: corsHeaders(),
+      }
+    );
   }
+
+  const expectedToken = getRequiredVerifyToken();
 
   if (mode === 'subscribe' && token && token === expectedToken) {
     return new Response(challenge ?? '', {
@@ -108,13 +111,15 @@ export async function GET(req: Request): Promise<Response> {
     hasToken: Boolean(token),
   });
 
-  return new Response('Forbidden', {
-    status: 403,
-    headers: {
-      'Content-Type': 'text/plain',
-      ...corsHeaders(),
+  return Response.json(
+    {
+      error: 'forbidden',
     },
-  });
+    {
+      status: 403,
+      headers: corsHeaders(),
+    }
+  );
 }
 
 export async function OPTIONS(): Promise<Response> {
@@ -133,6 +138,22 @@ export async function POST(req: Request): Promise<Response> {
 
   recordWebhookRequest('whatsapp');
 
+  const missing = getMissingEnvNames(['META_APP_SECRET']);
+  if (missing.length > 0) {
+    status = 500;
+    recordWebhookError('whatsapp');
+    return Response.json(
+      {
+        error: 'server_misconfigured',
+        missing,
+      },
+      {
+        status,
+        headers: corsHeaders(),
+      }
+    );
+  }
+
   if (!isAllowedOrigin(req)) {
     status = 403;
     recordWebhookError('whatsapp');
@@ -143,13 +164,15 @@ export async function POST(req: Request): Promise<Response> {
       status,
       origin: req.headers.get('origin'),
     });
-    return new Response('Forbidden', {
-      status: 403,
-      headers: {
-        'Content-Type': 'text/plain',
-        ...corsHeaders(),
+    return Response.json(
+      {
+        error: 'forbidden',
       },
-    });
+      {
+        status: 403,
+        headers: corsHeaders(),
+      }
+    );
   }
 
   const rateLimit = await enforceRateLimit({
@@ -201,20 +224,6 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
-  try {
-    assertRequiredEnv('META_APP_SECRET');
-  } catch {
-    status = 500;
-    recordWebhookError('whatsapp');
-    logStructured('error', 'whatsapp.missing_meta_secret', {
-      requestId,
-      route,
-      method,
-      status,
-    });
-    return Response.json({ ok: false, error: 'server_misconfigured' }, { status });
-  }
-
   const appSecret = String(process.env.META_APP_SECRET || '').trim();
   if (!verifyMetaSignature(rawBody, req.headers, appSecret)) {
     status = 403;
@@ -226,13 +235,15 @@ export async function POST(req: Request): Promise<Response> {
       status,
       hasSignature: Boolean(req.headers.get('x-hub-signature-256') || req.headers.get('x-hub-signature')),
     });
-    return new Response('Forbidden', {
-      status: 403,
-      headers: {
-        'Content-Type': 'text/plain',
-        ...corsHeaders(),
+    return Response.json(
+      {
+        error: 'forbidden',
       },
-    });
+      {
+        status: 403,
+        headers: corsHeaders(),
+      }
+    );
   }
 
   let payload: unknown = null;

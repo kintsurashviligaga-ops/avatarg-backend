@@ -56,6 +56,10 @@ export function assertRequiredEnv(name: keyof BackendEnvStatus): string {
   return value;
 }
 
+export function getMissingEnvNames(names: Array<keyof BackendEnvStatus>): string[] {
+  return names.filter((name) => !hasValue(process.env[name]));
+}
+
 export function getAllowedOrigin(): string | null {
   const preferred = String(process.env.FRONTEND_URL || '').trim();
   if (preferred) {

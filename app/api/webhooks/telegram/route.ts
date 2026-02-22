@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { assertRequiredEnv, getAllowedOrigin } from '@/lib/env';
+import { getAllowedOrigin, getMissingEnvNames } from '@/lib/env';
 import { logStructured } from '@/lib/logging/logger';
 import { getMemoryStore } from '@/lib/memory/store';
 import { normalizeTelegram } from '@/lib/messaging/normalize';
@@ -93,30 +93,24 @@ export async function POST(req: Request): Promise<Response> {
 
   recordWebhookRequest('telegram');
 
-  try {
-    assertRequiredEnv('TELEGRAM_BOT_TOKEN');
-  } catch {
+  const missing = getMissingEnvNames(['TELEGRAM_BOT_TOKEN']);
+  if (missing.length > 0) {
     status = 500;
     recordWebhookError('telegram');
-    logStructured('error', 'telegram.missing_bot_token', {
+    logStructured('error', 'telegram.missing_required_env', {
       requestId,
       route,
       method,
       status,
+      missing,
     });
-    return Response.json({ ok: false, error: 'server_misconfigured' }, { status });
+    return Response.json({ error: 'server_misconfigured', missing }, { status });
   }
 
   if (!isAllowedOrigin(req)) {
     status = 403;
     recordWebhookError('telegram');
-    return new Response('Forbidden', {
-      status: 403,
-      headers: {
-        'Content-Type': 'text/plain',
-        ...corsHeaders(),
-      },
-    });
+    return Response.json({ error: 'forbidden' }, { status: 403, headers: corsHeaders() });
   }
 
   const rateLimit = await enforceRateLimit({
@@ -164,13 +158,7 @@ export async function POST(req: Request): Promise<Response> {
       method,
       status,
     });
-    return new Response('Forbidden', {
-      status: 403,
-      headers: {
-        'Content-Type': 'text/plain',
-        ...corsHeaders(),
-      },
-    });
+    return Response.json({ error: 'forbidden' }, { status: 403, headers: corsHeaders() });
   }
 
   let payload: unknown = null;
