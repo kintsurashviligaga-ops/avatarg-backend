@@ -10,23 +10,22 @@
 ## 2) Required Environment Variables
 
 - `WHATSAPP_VERIFY_TOKEN`
-- `WHATSAPP_ACCESS_TOKEN`
-- `WHATSAPP_PHONE_NUMBER_ID`
+- `META_APP_SECRET`
 - `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_SETUP_SECRET`
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-- `CRON_SECRET`
+- `TELEGRAM_WEBHOOK_SECRET` (recommended in production)
 
 ## 3) Optional but Recommended
 
-- `WHATSAPP_APP_SECRET` (enables Meta signature verification)
+- `TELEGRAM_SETUP_SECRET` (for `/setup` endpoint)
+- `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` (production rate limiting)
+- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (message memory persistence)
+- `SENTRY_DSN` (exception capture)
+- `ALERT_TELEGRAM_BOT_TOKEN`, `ALERT_TELEGRAM_CHAT_ID` (failure alerts)
 - `WHATSAPP_BUSINESS_ACCOUNT_ID`
-- `TELEGRAM_WEBHOOK_SECRET` (enables secret header validation)
 - `FRONTEND_URL` (for API CORS allow-origin)
 - `SITE_URL`
 - `PUBLIC_APP_URL`
-- `WHATSAPP_DEBUG=false`
+- `DEBUG_LOGS=false`
 
 ## 4) Meta Webhook
 
@@ -54,7 +53,7 @@ WhatsApp verify (bad):
 
 WhatsApp POST:
 
-`curl -i -X POST "https://avatarg-backend.vercel.app/api/webhooks/whatsapp" -H "Content-Type: application/json" -d '{"object":"whatsapp_business_account","entry":[]}'`
+`node scripts/smoke-webhook-whatsapp.mjs`
 
 Telegram setup (idempotent):
 
@@ -62,7 +61,11 @@ Telegram setup (idempotent):
 
 Telegram POST:
 
-`curl -i -X POST "https://avatarg-backend.vercel.app/api/webhooks/telegram" -H "Content-Type: application/json" -H "x-telegram-bot-api-secret-token: <TELEGRAM_WEBHOOK_SECRET>" -d '{"update_id":1001,"message":{"message_id":1,"date":1700000000,"text":"hello","chat":{"id":123,"type":"private"},"from":{"id":123,"is_bot":false}}}'`
+`node scripts/smoke-webhook-telegram.mjs`
+
+Metrics endpoint:
+
+`curl -i "https://avatarg-backend.vercel.app/api/metrics"`
 
 Expected outcomes:
 

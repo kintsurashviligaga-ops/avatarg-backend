@@ -1,21 +1,20 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { assertRequiredEnv, getAllowedOrigin } from '@/lib/env';
-import { logStructured } from '@/lib/logger';
+import { logStructured } from '@/lib/logging/logger';
+import { normalizeWhatsApp } from '@/lib/messaging/normalize';
+import { routeMessage } from '@/lib/messaging/router';
+import { getMemoryStore } from '@/lib/memory/store';
+import { recordFailureAndAlert } from '@/lib/monitoring/alerts';
+import { captureException } from '@/lib/monitoring/errorTracker';
+import { recordWebhookError, recordWebhookLatency, recordWebhookRequest } from '@/lib/monitoring/metrics';
+import { enforceRateLimit } from '@/lib/security/rateLimit';
+import { verifyMetaSignature } from '@/lib/security/signature';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-type RateRecord = {
-  windowStart: number;
-  count: number;
-};
-
-const rateByIp = new Map<string, RateRecord>();
-const dedupeByMessageId = new Map<string, number>();
-
-const RATE_WINDOW_MS = 60_000;
-const RATE_MAX_REQUESTS = 120;
-const DEDUPE_TTL_MS = 10 * 60_000;
+const RATE_WINDOW_SEC = 60;
+const RATE_MAX_REQUESTS = 60;
 const MAX_PAYLOAD_BYTES = 1_000_000;
 function corsHeaders(): HeadersInit {
   const allowedOrigin = getAllowedOrigin();
@@ -34,17 +33,6 @@ function corsHeaders(): HeadersInit {
   return headers;
 }
 
-function debugEnabled(): boolean {
-  return String(process.env.WHATSAPP_DEBUG || '').trim().toLowerCase() === 'true';
-}
-
-function logDebug(message: string, extra?: Record<string, unknown>): void {
-  if (!debugEnabled()) {
-    return;
-  }
-  console.info('[WhatsApp.Webhook]', { message, ...(extra || {}) });
-}
-
 function getRequiredVerifyToken(): string {
   try {
     return assertRequiredEnv('WHATSAPP_VERIFY_TOKEN');
@@ -52,15 +40,6 @@ function getRequiredVerifyToken(): string {
     console.error('[WhatsApp.Webhook] missing_required_env:WHATSAPP_VERIFY_TOKEN');
     throw new Error('missing_required_env:WHATSAPP_VERIFY_TOKEN');
   }
-}
-
-function timingSafeEquals(a: string, b: string): boolean {
-  const left = Buffer.from(a);
-  const right = Buffer.from(b);
-  if (left.length !== right.length) {
-    return false;
-  }
-  return timingSafeEqual(left, right);
 }
 
 function cleanIp(rawIp: string | null): string {
@@ -80,47 +59,6 @@ function getRequestIp(req: Request): string {
   return cleanIp(req.headers.get('x-real-ip'));
 }
 
-function enforceRateLimit(req: Request): { ok: true } | { ok: false; retryAfterSec: number } {
-  const now = Date.now();
-  const ip = getRequestIp(req);
-  const record = rateByIp.get(ip);
-
-  if (!record || now - record.windowStart >= RATE_WINDOW_MS) {
-    rateByIp.set(ip, { windowStart: now, count: 1 });
-    return { ok: true };
-  }
-
-  if (record.count >= RATE_MAX_REQUESTS) {
-    const retryAfterSec = Math.max(1, Math.ceil((RATE_WINDOW_MS - (now - record.windowStart)) / 1000));
-    return { ok: false, retryAfterSec };
-  }
-
-  record.count += 1;
-  return { ok: true };
-}
-
-function verifySignature(rawBody: string, signatureHeader: string | null): boolean {
-  const appSecret = String(process.env.WHATSAPP_APP_SECRET || '').trim();
-  if (!appSecret) {
-    return true;
-  }
-
-  if (!signatureHeader || !signatureHeader.startsWith('sha256=')) {
-    return false;
-  }
-
-  const received = signatureHeader.slice('sha256='.length);
-  if (!received) {
-    return false;
-  }
-
-  const expected = createHmac('sha256', appSecret).update(rawBody, 'utf8').digest('hex');
-  if (received.length !== expected.length) {
-    return false;
-  }
-  return timingSafeEquals(received, expected);
-}
-
 function isAllowedOrigin(req: Request): boolean {
   const requestOrigin = String(req.headers.get('origin') || '').trim();
   if (!requestOrigin) {
@@ -135,63 +73,6 @@ function isAllowedOrigin(req: Request): boolean {
   return requestOrigin === allowedOrigin;
 }
 
-function sweepDedupeCache(now: number): void {
-  for (const [messageId, expiresAt] of dedupeByMessageId.entries()) {
-    if (expiresAt <= now) {
-      dedupeByMessageId.delete(messageId);
-    }
-  }
-}
-
-function collectMessageIds(payload: unknown): string[] {
-  const root = payload as Record<string, unknown> | null;
-  if (!root || !Array.isArray(root.entry)) {
-    return [];
-  }
-
-  const ids: string[] = [];
-  for (const entry of root.entry) {
-    const entryObj = entry as Record<string, unknown> | null;
-    if (!entryObj || !Array.isArray(entryObj.changes)) {
-      continue;
-    }
-
-    for (const change of entryObj.changes) {
-      const changeObj = change as Record<string, unknown> | null;
-      const value = (changeObj?.value || null) as Record<string, unknown> | null;
-      if (!value || !Array.isArray(value.messages)) {
-        continue;
-      }
-
-      for (const message of value.messages) {
-        const messageObj = message as Record<string, unknown> | null;
-        const id = typeof messageObj?.id === 'string' ? messageObj.id.trim() : '';
-        if (id) {
-          ids.push(id);
-        }
-      }
-    }
-  }
-
-  return ids;
-}
-
-function hasRecentDuplicate(messageIds: string[], now: number): boolean {
-  for (const id of messageIds) {
-    const expiresAt = dedupeByMessageId.get(id);
-    if (expiresAt && expiresAt > now) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function rememberMessageIds(messageIds: string[], now: number): void {
-  const expiresAt = now + DEDUPE_TTL_MS;
-  for (const id of messageIds) {
-    dedupeByMessageId.set(id, expiresAt);
-  }
-}
 
 export async function GET(req: Request): Promise<Response> {
   const url = new URL(req.url);
@@ -212,7 +93,7 @@ export async function GET(req: Request): Promise<Response> {
     });
   }
 
-  if (mode === 'subscribe' && token && timingSafeEquals(token, expectedToken)) {
+  if (mode === 'subscribe' && token && token === expectedToken) {
     return new Response(challenge ?? '', {
       status: 200,
       headers: {
@@ -243,36 +124,23 @@ export async function OPTIONS(): Promise<Response> {
   });
 }
 
-function processPayloadSafely(payload: unknown): void {
-  try {
-    const now = Date.now();
-    sweepDedupeCache(now);
-
-    const messageIds = collectMessageIds(payload);
-    const isDuplicate = hasRecentDuplicate(messageIds, now);
-    if (!isDuplicate) {
-      rememberMessageIds(messageIds, now);
-    }
-
-    logDebug('payload_processed', {
-      timestamp: new Date(now).toISOString(),
-      messageCount: messageIds.length,
-      messageIds,
-      isDuplicate,
-    });
-  } catch (error) {
-    console.error('[WhatsApp.Webhook] process_failed', {
-      message: error instanceof Error ? error.message : 'unknown',
-    });
-  }
-}
-
 export async function POST(req: Request): Promise<Response> {
-  const requestId = crypto.randomUUID();
+  const requestId = randomUUID();
+  const route = '/api/webhooks/whatsapp';
+  const method = 'POST';
+  const startedAt = Date.now();
+  let status = 200;
+
+  recordWebhookRequest('whatsapp');
 
   if (!isAllowedOrigin(req)) {
+    status = 403;
+    recordWebhookError('whatsapp');
     logStructured('warn', 'whatsapp.origin_rejected', {
       requestId,
+      route,
+      method,
+      status,
       origin: req.headers.get('origin'),
     });
     return new Response('Forbidden', {
@@ -284,10 +152,21 @@ export async function POST(req: Request): Promise<Response> {
     });
   }
 
-  const rateLimit = enforceRateLimit(req);
+  const rateLimit = await enforceRateLimit({
+    route: 'webhooks_whatsapp',
+    ip: getRequestIp(req),
+    limit: RATE_MAX_REQUESTS,
+    windowSec: RATE_WINDOW_SEC,
+  });
+
   if (!rateLimit.ok) {
+    status = 429;
+    recordWebhookError('whatsapp');
     logStructured('warn', 'whatsapp.rate_limited', {
       requestId,
+      route,
+      method,
+      status,
       retryAfterSec: rateLimit.retryAfterSec,
     });
     return Response.json(
@@ -304,8 +183,13 @@ export async function POST(req: Request): Promise<Response> {
 
   const rawBody = await req.text();
   if (rawBody.length > MAX_PAYLOAD_BYTES) {
+    status = 413;
+    recordWebhookError('whatsapp');
     logStructured('warn', 'whatsapp.payload_too_large', {
       requestId,
+      route,
+      method,
+      status,
       payloadBytes: rawBody.length,
     });
     return Response.json(
@@ -317,11 +201,30 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
-  const signature = req.headers.get('x-hub-signature-256');
-  if (!verifySignature(rawBody, signature)) {
+  try {
+    assertRequiredEnv('META_APP_SECRET');
+  } catch {
+    status = 500;
+    recordWebhookError('whatsapp');
+    logStructured('error', 'whatsapp.missing_meta_secret', {
+      requestId,
+      route,
+      method,
+      status,
+    });
+    return Response.json({ ok: false, error: 'server_misconfigured' }, { status });
+  }
+
+  const appSecret = String(process.env.META_APP_SECRET || '').trim();
+  if (!verifyMetaSignature(rawBody, req.headers, appSecret)) {
+    status = 403;
+    recordWebhookError('whatsapp');
     logStructured('warn', 'whatsapp.signature_invalid', {
       requestId,
-      hasSignature: Boolean(signature),
+      route,
+      method,
+      status,
+      hasSignature: Boolean(req.headers.get('x-hub-signature-256') || req.headers.get('x-hub-signature')),
     });
     return new Response('Forbidden', {
       status: 403,
@@ -336,24 +239,54 @@ export async function POST(req: Request): Promise<Response> {
   try {
     payload = rawBody ? JSON.parse(rawBody) : null;
   } catch {
+    status = 400;
+    recordWebhookError('whatsapp');
     logStructured('warn', 'whatsapp.invalid_json', { requestId });
-    return Response.json({ ok: true }, { status: 200, headers: corsHeaders() });
+    return Response.json({ ok: false, error: 'invalid_json' }, { status, headers: corsHeaders() });
   }
 
-  const contentLength = Number(req.headers.get('content-length') || '0');
-  logDebug('inbound', {
-    timestamp: new Date().toISOString(),
-    hasPayload: Boolean(payload),
-    contentLength,
-  });
+  try {
+    const messages = normalizeWhatsApp(payload);
+    const store = getMemoryStore();
 
-  queueMicrotask(() => processPayloadSafely(payload));
-
-  return Response.json(
-    { ok: true },
-    {
-      status: 200,
-      headers: corsHeaders(),
+    for (const msg of messages) {
+      await store.saveMessage(msg);
+      const decision = routeMessage(msg);
+      logStructured('info', 'message_routed', {
+        requestId,
+        route,
+        method,
+        status,
+        platform: 'whatsapp',
+        from: msg.from,
+        chatId: msg.chatId,
+        messageId: msg.messageId,
+        agentName: decision.agentName,
+        action: decision.action,
+      });
     }
-  );
+
+    return Response.json({ ok: true, received: messages.length }, { status, headers: corsHeaders() });
+  } catch (error) {
+    status = 500;
+    recordWebhookError('whatsapp');
+    await captureException(error, { requestId, route, method });
+    await recordFailureAndAlert({
+      requestId,
+      route,
+      error: error instanceof Error ? error.message : 'unknown',
+    });
+    return Response.json({ ok: false, error: 'internal_error' }, { status, headers: corsHeaders() });
+  } finally {
+    const latencyMs = Date.now() - startedAt;
+    recordWebhookLatency('whatsapp', latencyMs);
+    logStructured('info', 'webhook_received', {
+      requestId,
+      route,
+      method,
+      status,
+      latencyMs,
+      platform: 'whatsapp',
+    });
+  }
 }

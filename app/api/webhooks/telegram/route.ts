@@ -1,14 +1,18 @@
-import crypto from 'node:crypto';
-import { getAllowedOrigin } from '@/lib/env';
-import { logStructured } from '@/lib/logger';
+import { randomUUID } from 'node:crypto';
+import { assertRequiredEnv, getAllowedOrigin } from '@/lib/env';
+import { logStructured } from '@/lib/logging/logger';
+import { getMemoryStore } from '@/lib/memory/store';
+import { normalizeTelegram } from '@/lib/messaging/normalize';
+import { routeMessage } from '@/lib/messaging/router';
+import { recordFailureAndAlert } from '@/lib/monitoring/alerts';
+import { captureException } from '@/lib/monitoring/errorTracker';
+import { recordWebhookError, recordWebhookLatency, recordWebhookRequest } from '@/lib/monitoring/metrics';
+import { enforceRateLimit } from '@/lib/security/rateLimit';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-type RateRecord = { windowStart: number; count: number };
-
-const rateByIp = new Map<string, RateRecord>();
-const RATE_WINDOW_MS = 60_000;
+const RATE_WINDOW_SEC = 60;
 const RATE_MAX_REQUESTS = 120;
 const MAX_PAYLOAD_BYTES = 1_000_000;
 
@@ -45,25 +49,6 @@ function getRequestIp(req: Request): string {
   return cleanIp(req.headers.get('x-real-ip'));
 }
 
-function enforceRateLimit(req: Request): { ok: true } | { ok: false; retryAfterSec: number } {
-  const now = Date.now();
-  const ip = getRequestIp(req);
-  const record = rateByIp.get(ip);
-
-  if (!record || now - record.windowStart >= RATE_WINDOW_MS) {
-    rateByIp.set(ip, { windowStart: now, count: 1 });
-    return { ok: true };
-  }
-
-  if (record.count >= RATE_MAX_REQUESTS) {
-    const retryAfterSec = Math.max(1, Math.ceil((RATE_WINDOW_MS - (now - record.windowStart)) / 1000));
-    return { ok: false, retryAfterSec };
-  }
-
-  record.count += 1;
-  return { ok: true };
-}
-
 function isAllowedOrigin(req: Request): boolean {
   const requestOrigin = String(req.headers.get('origin') || '').trim();
   if (!requestOrigin) {
@@ -88,27 +73,8 @@ function hasValidTelegramSecret(req: Request): boolean {
   return Boolean(provided && provided === expected);
 }
 
-function queueTelegramProcessing(payload: unknown, requestId: string): void {
-  queueMicrotask(() => {
-    try {
-      const root = payload as Record<string, unknown> | null;
-      const updateId = typeof root?.update_id === 'number' ? root.update_id : null;
-      const message = (root?.message || null) as Record<string, unknown> | null;
-      const chat = (message?.chat || null) as Record<string, unknown> | null;
-      const chatId = chat?.id ?? null;
-
-      logStructured('info', 'telegram.webhook_processed', {
-        requestId,
-        updateId,
-        chatId,
-      });
-    } catch (error) {
-      logStructured('error', 'telegram.webhook_processing_failed', {
-        requestId,
-        message: error instanceof Error ? error.message : 'unknown',
-      });
-    }
-  });
+export async function GET(): Promise<Response> {
+  return Response.json({ ok: true, platform: 'telegram', timestamp: new Date().toISOString() }, { status: 200 });
 }
 
 export async function OPTIONS(): Promise<Response> {
@@ -119,9 +85,31 @@ export async function OPTIONS(): Promise<Response> {
 }
 
 export async function POST(req: Request): Promise<Response> {
-  const requestId = crypto.randomUUID();
+  const requestId = randomUUID();
+  const route = '/api/webhooks/telegram';
+  const method = 'POST';
+  const startedAt = Date.now();
+  let status = 200;
+
+  recordWebhookRequest('telegram');
+
+  try {
+    assertRequiredEnv('TELEGRAM_BOT_TOKEN');
+  } catch {
+    status = 500;
+    recordWebhookError('telegram');
+    logStructured('error', 'telegram.missing_bot_token', {
+      requestId,
+      route,
+      method,
+      status,
+    });
+    return Response.json({ ok: false, error: 'server_misconfigured' }, { status });
+  }
 
   if (!isAllowedOrigin(req)) {
+    status = 403;
+    recordWebhookError('telegram');
     return new Response('Forbidden', {
       status: 403,
       headers: {
@@ -131,8 +119,23 @@ export async function POST(req: Request): Promise<Response> {
     });
   }
 
-  const rateLimit = enforceRateLimit(req);
+  const rateLimit = await enforceRateLimit({
+    route: 'webhooks_telegram',
+    ip: getRequestIp(req),
+    limit: RATE_MAX_REQUESTS,
+    windowSec: RATE_WINDOW_SEC,
+  });
+
   if (!rateLimit.ok) {
+    status = 429;
+    recordWebhookError('telegram');
+    logStructured('warn', 'telegram.rate_limited', {
+      requestId,
+      route,
+      method,
+      status,
+      retryAfterSec: rateLimit.retryAfterSec,
+    });
     return Response.json(
       { ok: false, error: 'rate_limited' },
       {
@@ -147,10 +150,20 @@ export async function POST(req: Request): Promise<Response> {
 
   const rawBody = await req.text();
   if (rawBody.length > MAX_PAYLOAD_BYTES) {
+    status = 413;
+    recordWebhookError('telegram');
     return Response.json({ ok: false, error: 'payload_too_large' }, { status: 413, headers: corsHeaders() });
   }
 
   if (!hasValidTelegramSecret(req)) {
+    status = 403;
+    recordWebhookError('telegram');
+    logStructured('warn', 'telegram.secret_invalid', {
+      requestId,
+      route,
+      method,
+      status,
+    });
     return new Response('Forbidden', {
       status: 403,
       headers: {
@@ -164,16 +177,54 @@ export async function POST(req: Request): Promise<Response> {
   try {
     payload = rawBody ? JSON.parse(rawBody) : null;
   } catch {
+    status = 400;
+    recordWebhookError('telegram');
     logStructured('warn', 'telegram.invalid_json', { requestId });
-    return Response.json({ ok: true }, { status: 200, headers: corsHeaders() });
+    return Response.json({ ok: false, error: 'invalid_json' }, { status, headers: corsHeaders() });
   }
 
-  logStructured('info', 'telegram.inbound_received', {
-    requestId,
-    payloadPresent: Boolean(payload),
-  });
+  try {
+    const messages = normalizeTelegram(payload);
+    const store = getMemoryStore();
 
-  queueTelegramProcessing(payload, requestId);
+    for (const msg of messages) {
+      await store.saveMessage(msg);
+      const decision = routeMessage(msg);
+      logStructured('info', 'message_routed', {
+        requestId,
+        route,
+        method,
+        status,
+        platform: 'telegram',
+        from: msg.from,
+        chatId: msg.chatId,
+        messageId: msg.messageId,
+        agentName: decision.agentName,
+        action: decision.action,
+      });
+    }
 
-  return Response.json({ ok: true }, { status: 200, headers: corsHeaders() });
+    return Response.json({ ok: true, received: messages.length }, { status, headers: corsHeaders() });
+  } catch (error) {
+    status = 500;
+    recordWebhookError('telegram');
+    await captureException(error, { requestId, route, method });
+    await recordFailureAndAlert({
+      requestId,
+      route,
+      error: error instanceof Error ? error.message : 'unknown',
+    });
+    return Response.json({ ok: false, error: 'internal_error' }, { status, headers: corsHeaders() });
+  } finally {
+    const latencyMs = Date.now() - startedAt;
+    recordWebhookLatency('telegram', latencyMs);
+    logStructured('info', 'webhook_received', {
+      requestId,
+      route,
+      method,
+      status,
+      latencyMs,
+      platform: 'telegram',
+    });
+  }
 }

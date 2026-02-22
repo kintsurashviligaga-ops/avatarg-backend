@@ -1,6 +1,10 @@
+import { createHmac } from 'node:crypto';
+
 const baseUrl = (process.env.BACKEND_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
 const verifyToken = String(process.env.WHATSAPP_VERIFY_TOKEN || '').trim();
+const metaSecret = String(process.env.META_APP_SECRET || '').trim();
 const telegramSecret = String(process.env.TELEGRAM_WEBHOOK_SECRET || '').trim();
+const telegramBotToken = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
 
 function assert(condition, message) {
   if (!condition) {
@@ -19,9 +23,11 @@ async function run() {
 
   const health = await fetchJson(`${baseUrl}/api/health`);
   assert(health.response.status === 200, `health expected 200, got ${health.response.status}`);
-  assert(health.body.includes('"ok":true'), 'health expected ok:true');
+  assert(health.body.includes('"service":"avatarg-backend"'), 'health expected service marker');
 
   assert(verifyToken, 'WHATSAPP_VERIFY_TOKEN must be set');
+  assert(metaSecret, 'META_APP_SECRET must be set');
+  assert(telegramBotToken, 'TELEGRAM_BOT_TOKEN must be set');
   const verifyOk = await fetchJson(
     `${baseUrl}/api/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=${encodeURIComponent(verifyToken)}&hub.challenge=12345`
   );
@@ -33,10 +39,40 @@ async function run() {
   );
   assert(verifyBad.response.status === 403, `whatsapp wrong verify expected 403, got ${verifyBad.response.status}`);
 
+  const waPayload = JSON.stringify({
+    object: 'whatsapp_business_account',
+    entry: [
+      {
+        changes: [
+          {
+            field: 'messages',
+            value: {
+              contacts: [{ wa_id: '15550001111' }],
+              messages: [
+                {
+                  id: 'wamid.test.webhook.1',
+                  from: '15550001111',
+                  timestamp: String(Math.floor(Date.now() / 1000)),
+                  type: 'text',
+                  text: { body: '/help avatar' },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  const waSignature = createHmac('sha256', metaSecret).update(waPayload, 'utf8').digest('hex');
+
   const waPost = await fetchJson(`${baseUrl}/api/webhooks/whatsapp`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ object: 'whatsapp_business_account', entry: [] }),
+    headers: {
+      'Content-Type': 'application/json',
+      'x-hub-signature-256': `sha256=${waSignature}`,
+    },
+    body: waPayload,
   });
   assert(waPost.response.status === 200, `whatsapp post expected 200, got ${waPost.response.status}`);
 

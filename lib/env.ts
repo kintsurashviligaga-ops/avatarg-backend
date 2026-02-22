@@ -3,10 +3,15 @@ export type BackendEnvStatus = {
   WHATSAPP_ACCESS_TOKEN: boolean;
   WHATSAPP_PHONE_NUMBER_ID: boolean;
   WHATSAPP_BUSINESS_ACCOUNT_ID: boolean;
-  WHATSAPP_APP_SECRET: boolean;
+  META_APP_SECRET: boolean;
   TELEGRAM_BOT_TOKEN: boolean;
   TELEGRAM_WEBHOOK_SECRET: boolean;
   TELEGRAM_SETUP_SECRET: boolean;
+  UPSTASH_REDIS_REST_URL: boolean;
+  UPSTASH_REDIS_REST_TOKEN: boolean;
+  SENTRY_DSN: boolean;
+  ALERT_TELEGRAM_BOT_TOKEN: boolean;
+  ALERT_TELEGRAM_CHAT_ID: boolean;
   SUPABASE_URL: boolean;
   SUPABASE_SERVICE_ROLE_KEY: boolean;
   CRON_SECRET: boolean;
@@ -25,10 +30,15 @@ export function getBackendEnvStatus(): BackendEnvStatus {
     WHATSAPP_ACCESS_TOKEN: hasValue(process.env.WHATSAPP_ACCESS_TOKEN),
     WHATSAPP_PHONE_NUMBER_ID: hasValue(process.env.WHATSAPP_PHONE_NUMBER_ID),
     WHATSAPP_BUSINESS_ACCOUNT_ID: hasValue(process.env.WHATSAPP_BUSINESS_ACCOUNT_ID),
-    WHATSAPP_APP_SECRET: hasValue(process.env.WHATSAPP_APP_SECRET),
+    META_APP_SECRET: hasValue(process.env.META_APP_SECRET),
     TELEGRAM_BOT_TOKEN: hasValue(process.env.TELEGRAM_BOT_TOKEN),
     TELEGRAM_WEBHOOK_SECRET: hasValue(process.env.TELEGRAM_WEBHOOK_SECRET),
     TELEGRAM_SETUP_SECRET: hasValue(process.env.TELEGRAM_SETUP_SECRET),
+    UPSTASH_REDIS_REST_URL: hasValue(process.env.UPSTASH_REDIS_REST_URL),
+    UPSTASH_REDIS_REST_TOKEN: hasValue(process.env.UPSTASH_REDIS_REST_TOKEN),
+    SENTRY_DSN: hasValue(process.env.SENTRY_DSN),
+    ALERT_TELEGRAM_BOT_TOKEN: hasValue(process.env.ALERT_TELEGRAM_BOT_TOKEN),
+    ALERT_TELEGRAM_CHAT_ID: hasValue(process.env.ALERT_TELEGRAM_CHAT_ID),
     SUPABASE_URL: hasValue(process.env.SUPABASE_URL),
     SUPABASE_SERVICE_ROLE_KEY: hasValue(process.env.SUPABASE_SERVICE_ROLE_KEY),
     CRON_SECRET: hasValue(process.env.CRON_SECRET),
@@ -72,4 +82,13 @@ export function getPublicBaseUrl(): string | null {
   }
 
   return null;
+}
+
+export function shortVersion(): string {
+  const fromVercel = String(process.env.VERCEL_GIT_COMMIT_SHA || '').trim();
+  if (fromVercel) {
+    return fromVercel.slice(0, 7);
+  }
+
+  return 'dev';
 }
