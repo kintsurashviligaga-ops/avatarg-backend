@@ -4,11 +4,10 @@ import { assertRequiredEnv, getAllowedOrigin, getMissingEnvNames } from '@/lib/e
 import { logStructured } from '@/lib/logging/logger';
 import { buildEventId, claimWebhookEvent } from '@/lib/messaging/idempotency';
 import { normalizeWhatsApp } from '@/lib/messaging/normalize';
-import { routeMessage } from '@/lib/messaging/router';
-import { getMemoryStore } from '@/lib/memory/store';
 import { recordFailureAndAlert } from '@/lib/monitoring/alerts';
 import { captureException } from '@/lib/monitoring/errorTracker';
 import { recordDedupeBlockMetric, recordWebhookError, recordWebhookLatency, recordWebhookRequest } from '@/lib/monitoring/metrics';
+import { enqueueJob } from '@/lib/queue';
 import { enforceRateLimit } from '@/lib/security/rateLimit';
 import { verifyMetaSignature } from '@/lib/security/signature';
 import { RedisMisconfiguredError, RedisUnavailableError } from '@/lib/redis';
@@ -317,25 +316,21 @@ export async function POST(req: Request): Promise<Response> {
     }
 
     const handoffStartedAt = Date.now();
-    queueMicrotask(async () => {
-      const store = getMemoryStore();
-      for (const msg of messages) {
-        await store.saveMessage(msg);
-        const decision = routeMessage(msg);
-        logStructured('info', 'message_routed', {
-          requestId,
-          route,
-          method,
-          status: 200,
-          platform: 'whatsapp',
-          from: msg.from,
-          chatId: msg.chatId,
-          messageId: msg.messageId,
-          agentName: decision.agentName,
-          action: decision.action,
-        });
-      }
+    const enqueue = await enqueueJob({
+      queue: 'queue:standard',
+      type: 'webhook_message',
+      source: 'whatsapp',
+      idempotencyKey: eventId,
+      payload: {
+        eventId,
+        messages,
+      },
     });
+
+    if (!enqueue.ok) {
+      status = 503;
+      return Response.json({ ok: false, error: 'queue_unavailable' }, { status, headers: corsHeaders() });
+    }
 
     if (handoffStartedAt - startedAt > 2000) {
       logStructured('warn', 'webhook_handoff_delayed', {
@@ -347,7 +342,7 @@ export async function POST(req: Request): Promise<Response> {
       });
     }
 
-    return Response.json({ ok: true, enqueued: true, eventId }, { status, headers: corsHeaders() });
+    return Response.json({ ok: true, enqueued: true, eventId, jobId: enqueue.jobId }, { status, headers: corsHeaders() });
   } catch (error) {
     status = 500;
     recordWebhookError('whatsapp');
