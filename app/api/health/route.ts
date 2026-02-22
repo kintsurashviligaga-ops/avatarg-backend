@@ -1,6 +1,5 @@
 import '@/lib/bootstrap';
-import { getBackendEnvStatus, shortVersion } from '@/lib/env';
-import { OPTIONAL_ENV_NAMES, REQUIRED_ENV_NAMES, isTelegramEnabled } from '@/lib/env';
+import { getBackendEnvStatus, getEnvIntegritySummary, shortVersion } from '@/lib/env';
 import { logStructured } from '@/lib/logging/logger';
 import { getRequestId, jsonHeadersWithRequestId } from '@/lib/logging/request';
 import { checkMemoryConnectivity } from '@/lib/memory/store';
@@ -18,17 +17,9 @@ export async function GET(req: Request): Promise<Response> {
     checkMemoryConnectivity(),
   ]);
 
-  const required = [...REQUIRED_ENV_NAMES, ...(isTelegramEnabled() ? (['TELEGRAM_BOT_TOKEN'] as const) : [])];
-  const optional = OPTIONAL_ENV_NAMES;
-  const requiredMissing = required.filter((name) => !env[name]);
-  const optionalMissing = optional.filter((name) => !env[name]);
-  const envIntegrity = {
-    requiredOk: requiredMissing.length === 0,
-    requiredMissing,
-    optionalMissing,
-  };
+  const envIntegrity = getEnvIntegritySummary(env);
 
-  const ok = redis.ok && memory.ok && redis.enabled && envIntegrity.requiredOk;
+  const ok = redis.ok && memory.ok && redis.enabled && envIntegrity.env_integrity_status === 'pass';
   const status = ok ? 200 : 503;
   const latencyMs = Date.now() - startedAt;
 
@@ -47,6 +38,12 @@ export async function GET(req: Request): Promise<Response> {
     {
       ok,
       service: 'avatarg-backend',
+      env_integrity_status: envIntegrity.env_integrity_status,
+      missing_vars: envIntegrity.missing_vars,
+      malformed_vars: envIntegrity.malformed_vars,
+      redis_enabled: redis.enabled,
+      redis_ping_ok: redis.ok,
+      latency_ms: latencyMs,
       uptime: Math.floor(process.uptime()),
       version: shortVersion(),
       timestamp: new Date().toISOString(),

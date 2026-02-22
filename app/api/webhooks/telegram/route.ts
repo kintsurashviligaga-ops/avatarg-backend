@@ -199,25 +199,33 @@ export async function POST(req: Request): Promise<Response> {
       return typeof root?.update_id === 'number' ? String(root.update_id) : undefined;
     })();
 
-    eventId = fallbackUpdateId
-      ? `telegram:update:${fallbackUpdateId}`
-      : buildEventId({
-          platform: 'telegram',
-          rawBody,
-          messageIds: messages.map((msg) => msg.messageId),
-          fallbackId: fallbackUpdateId,
-        });
+    const messageId = messages[0]?.messageId;
+    const updateEventId = fallbackUpdateId ? `update:${fallbackUpdateId}` : null;
+    const messageEventId = messageId ? `message:${messageId}` : null;
 
-    const claim = await claimWebhookEvent({
-      platform: 'telegram',
-      eventId,
-      ttlSec: TELEGRAM_IDEMPOTENCY_TTL_SEC,
-      requestId,
+    eventId = buildEventId({
+      source: 'telegram',
+      rawBody,
+      messageIds: [updateEventId, messageEventId].filter(Boolean) as string[],
+      fallbackId: fallbackUpdateId,
     });
 
-    redisUsed = claim.redisUsed || rateLimit.source === 'upstash';
+    const claims = await Promise.all(
+      [updateEventId, messageEventId]
+        .filter(Boolean)
+        .map((id) =>
+          claimWebhookEvent({
+            source: 'telegram',
+            eventId: String(id),
+            ttlSec: TELEGRAM_IDEMPOTENCY_TTL_SEC,
+            requestId,
+          })
+        )
+    );
 
-    if (!claim.accepted) {
+    redisUsed = claims.some((claim) => claim.redisUsed) || rateLimit.source === 'upstash';
+
+    if (claims.some((claim) => !claim.accepted)) {
       status = 200;
       return Response.json({ ok: true, duplicate: true, eventId }, { status, headers: corsHeaders() });
     }

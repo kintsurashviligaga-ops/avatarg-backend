@@ -50,14 +50,16 @@ export function normalizeWhatsApp(payload: unknown): NormalizedMessage[] {
       const firstContact = (contacts[0] || null) as Record<string, unknown> | null;
       const waFrom = toStringSafe(firstContact?.wa_id, 'unknown');
 
-      for (const item of value.messages) {
+      for (let index = 0; index < value.messages.length; index += 1) {
+        const item = value.messages[index];
         const msg = item as Record<string, unknown> | null;
         if (!msg) {
           continue;
         }
 
-        const msgId = toStringSafe(msg.id, `wa-${Date.now()}`);
         const from = toStringSafe(msg.from, waFrom);
+        const stableFallbackId = `wa:${from}:${toStringSafe(msg.timestamp, '0')}:${index}`;
+        const msgId = toStringSafe(msg.id, stableFallbackId);
         const timestamp = Number(msg.timestamp || Math.floor(Date.now() / 1000)) * 1000;
         const type = toStringSafe(msg.type, 'text');
         const textBody = ((msg.text || null) as Record<string, unknown> | null)?.body;

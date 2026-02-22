@@ -7,7 +7,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit --incremental false",
     "test:webhooks": "node scripts/test-webhooks.mjs",
     "smoke:health": "node scripts/smoke-health.mjs",
     "smoke:health:prod": "node scripts/smoke-health-prod.mjs",

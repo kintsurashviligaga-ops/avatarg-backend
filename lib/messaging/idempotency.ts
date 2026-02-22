@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { logStructured } from '@/lib/logging/logger';
-import { redisPipeline } from '@/lib/redis';
+import { redisSetNxWithTtl } from '@/lib/redis';
 
 type ClaimResult = {
   accepted: boolean;
@@ -44,52 +44,48 @@ function fallbackClaim(idempotencyKey: string, ttlSec: number): ClaimResult {
 }
 
 export function buildEventId(input: {
-  platform: 'whatsapp' | 'telegram';
+  source: 'whatsapp' | 'telegram';
   rawBody: string;
   messageIds?: string[];
   fallbackId?: string;
 }): string {
   if (input.messageIds && input.messageIds.length > 0) {
-    return `${input.platform}:${input.messageIds.join('|')}`;
+    return input.messageIds.join('|');
   }
 
   if (input.fallbackId) {
-    return `${input.platform}:${input.fallbackId}`;
+    return input.fallbackId;
   }
 
   const digest = createHash('sha256').update(input.rawBody, 'utf8').digest('hex').slice(0, 24);
-  return `${input.platform}:raw:${digest}`;
+  return `raw:${digest}`;
 }
 
 export async function claimWebhookEvent(input: {
-  platform: 'whatsapp' | 'telegram';
+  source: 'whatsapp' | 'telegram';
   eventId: string;
   ttlSec?: number;
   requestId: string;
 }): Promise<ClaimResult> {
-  const ttlSec = Math.max(60, input.ttlSec || 600);
-  const idempotencyKey = `idem:${input.platform}:${input.eventId}`;
+  const ttlSec = Math.max(60, input.ttlSec || 24 * 60 * 60);
+  const idempotencyKey = `idemp:${input.source}:${input.eventId}`;
 
   try {
-    const payload = await redisPipeline(
-      [['SET', idempotencyKey, '1', 'EX', ttlSec, 'NX']],
-      { strict: false }
-    );
+    const result = await redisSetNxWithTtl(idempotencyKey, '1', ttlSec, { strict: false });
 
-    if (!payload) {
+    if (!result.enabled || !result.ok) {
       return fallbackClaim(idempotencyKey, ttlSec);
     }
 
-    const result = payload[0]?.result;
     return {
-      accepted: result === 'OK',
+      accepted: Boolean(result.value),
       redisUsed: true,
       idempotencyKey,
     };
   } catch {
     logStructured('warn', 'idempotency.fallback_memory', {
       requestId: input.requestId,
-      platform: input.platform,
+      source: input.source,
     });
     return fallbackClaim(idempotencyKey, ttlSec);
   }

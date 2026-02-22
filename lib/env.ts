@@ -47,11 +47,21 @@ export const OPTIONAL_ENV_NAMES: Array<keyof BackendEnvStatus> = [
 
 export class EnvValidationError extends Error {
   missing: string[];
+  malformed: string[];
 
-  constructor(missing: string[]) {
-    super(`missing_required_env:${missing.join(',')}`);
+  constructor(missing: string[], malformed: string[] = []) {
+    const parts: string[] = [];
+    if (missing.length > 0) {
+      parts.push(`missing_required_env:${missing.join(',')}`);
+    }
+    if (malformed.length > 0) {
+      parts.push(`malformed_required_env:${malformed.join(',')}`);
+    }
+
+    super(parts.join('|') || 'env_validation_error');
     this.name = 'EnvValidationError';
     this.missing = missing;
+    this.malformed = malformed;
   }
 }
 
@@ -155,6 +165,38 @@ export function isTelegramEnabled(): boolean {
   return hasValue(process.env.TELEGRAM_BOT_TOKEN);
 }
 
+function isValidUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function getMalformedRequiredEnv(names: Array<keyof BackendEnvStatus>): string[] {
+  const urlVars: Array<keyof BackendEnvStatus> = ['UPSTASH_REDIS_REST_URL', 'SUPABASE_URL', 'FRONTEND_URL'];
+  const requiredSet = new Set(names);
+  const malformed: string[] = [];
+
+  for (const key of urlVars) {
+    if (!requiredSet.has(key)) {
+      continue;
+    }
+
+    const value = String(process.env[key] || '').trim();
+    if (!value) {
+      continue;
+    }
+
+    if (!isValidUrl(value)) {
+      malformed.push(String(key));
+    }
+  }
+
+  return malformed;
+}
+
 let bootValidationCompleted = false;
 
 export function validateBootEnvOrThrow(): void {
@@ -168,10 +210,35 @@ export function validateBootEnvOrThrow(): void {
   }
 
   const missing = getMissingEnvNames(required);
-  if (missing.length > 0) {
-    console.error(`[BOOT_ENV_VALIDATION] missing required env: ${missing.join(', ')}`);
-    throw new EnvValidationError(missing.map((name) => String(name)));
+  const malformed = getMalformedRequiredEnv(required);
+
+  if (missing.length > 0 || malformed.length > 0) {
+    if (missing.length > 0) {
+      console.error(`[BOOT_ENV_VALIDATION] missing required env: ${missing.join(', ')}`);
+    }
+    if (malformed.length > 0) {
+      console.error(`[BOOT_ENV_VALIDATION] malformed required env: ${malformed.join(', ')}`);
+    }
+    throw new EnvValidationError(
+      missing.map((name) => String(name)),
+      malformed.map((name) => String(name))
+    );
   }
 
   bootValidationCompleted = true;
+}
+
+export function getEnvIntegritySummary(status: BackendEnvStatus): {
+  env_integrity_status: 'pass' | 'fail';
+  missing_vars: string[];
+  malformed_vars: string[];
+} {
+  const required = [...REQUIRED_ENV_NAMES, ...(isTelegramEnabled() ? (['TELEGRAM_BOT_TOKEN'] as const) : [])];
+  const missing = required.filter((name) => !status[name]).map((name) => String(name));
+  const malformed = getMalformedRequiredEnv(required).map((name) => String(name));
+  return {
+    env_integrity_status: missing.length === 0 && malformed.length === 0 ? 'pass' : 'fail',
+    missing_vars: missing,
+    malformed_vars: malformed,
+  };
 }

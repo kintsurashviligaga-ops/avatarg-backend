@@ -296,14 +296,15 @@ export async function POST(req: Request): Promise<Response> {
   try {
     const messages = normalizeWhatsApp(payload);
     eventId = buildEventId({
-      platform: 'whatsapp',
+      source: 'whatsapp',
       rawBody,
       messageIds: messages.map((msg) => msg.messageId),
     });
 
     const claim = await claimWebhookEvent({
-      platform: 'whatsapp',
+      source: 'whatsapp',
       eventId,
+      ttlSec: 24 * 60 * 60,
       requestId,
     });
 

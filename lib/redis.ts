@@ -24,6 +24,14 @@ type RedisConfig = {
   token: string;
 };
 
+type RedisCallResult<T> = {
+  ok: boolean;
+  enabled: boolean;
+  value: T | null;
+  latencyMs: number;
+  error?: string;
+};
+
 type RedisSingleton = {
   initialized: boolean;
   config: RedisConfig | null;
@@ -84,31 +92,96 @@ async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3, baseDelayMs =
   throw new RedisUnavailableError(lastError instanceof Error ? lastError.message : 'redis_request_failed');
 }
 
-export async function redisPipeline(commands: RedisCommand[], options: { strict: boolean }): Promise<Array<{ result?: unknown }> | null> {
-  const config = readRedisConfig(options.strict);
+async function callRedis(commands: RedisCommand[], options: { strict: boolean }): Promise<RedisCallResult<Array<{ result?: unknown }>>> {
+  const startedAt = Date.now();
+
+  let config: RedisConfig | null;
+  try {
+    config = readRedisConfig(options.strict);
+  } catch (error) {
+    if (error instanceof RedisMisconfiguredError) {
+      return {
+        ok: false,
+        enabled: false,
+        value: null,
+        latencyMs: Date.now() - startedAt,
+        error: error.message,
+      };
+    }
+    throw error;
+  }
+
   if (!config) {
+    return {
+      ok: false,
+      enabled: false,
+      value: null,
+      latencyMs: Date.now() - startedAt,
+      error: 'redis_not_enabled',
+    };
+  }
+
+  try {
+    const response = await withRetry(async () => {
+      const res = await fetch(`${config.url}/pipeline`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${config.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(commands),
+        cache: 'no-store',
+      });
+
+      if (!res.ok) {
+        throw new RedisUnavailableError(`redis_http_${res.status}`);
+      }
+
+      return res;
+    });
+
+    const payload = (await response.json().catch(() => null)) as Array<{ result?: unknown }> | null;
+
+    return {
+      ok: true,
+      enabled: true,
+      value: payload,
+      latencyMs: Date.now() - startedAt,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      enabled: true,
+      value: null,
+      latencyMs: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : 'redis_request_failed',
+    };
+  }
+}
+
+export async function redisPipeline(commands: RedisCommand[], options: { strict: boolean }): Promise<Array<{ result?: unknown }> | null> {
+  const result = await callRedis(commands, options);
+  if (!result.ok) {
     return null;
   }
 
-  const response = await withRetry(async () => {
-    const res = await fetch(`${config.url}/pipeline`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${config.token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(commands),
-      cache: 'no-store',
-    });
+  return result.value;
+}
 
-    if (!res.ok) {
-      throw new RedisUnavailableError(`redis_http_${res.status}`);
-    }
+export async function redisSetNxWithTtl(key: string, value: string, ttlSec: number, options: { strict: boolean }): Promise<RedisCallResult<boolean>> {
+  const result = await callRedis([['SET', key, value, 'EX', ttlSec, 'NX']], options);
+  return {
+    ...result,
+    value: Boolean(result.value?.[0]?.result === 'OK'),
+  };
+}
 
-    return res;
-  });
-
-  return (await response.json().catch(() => null)) as Array<{ result?: unknown }> | null;
+export async function redisGet(key: string, options: { strict: boolean }): Promise<RedisCallResult<string | null>> {
+  const result = await callRedis([['GET', key]], options);
+  return {
+    ...result,
+    value: typeof result.value?.[0]?.result === 'string' ? String(result.value?.[0]?.result) : null,
+  };
 }
 
 export async function redisPing(options: { strict: boolean }): Promise<{ ok: boolean; enabled: boolean; latencyMs: number; missing?: string[] }> {
