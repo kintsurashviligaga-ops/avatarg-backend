@@ -45,6 +45,15 @@ function logDebug(message: string, extra?: Record<string, unknown>): void {
   console.info('[WhatsApp.Webhook]', { message, ...(extra || {}) });
 }
 
+function getRequiredVerifyToken(): string {
+  try {
+    return assertRequiredEnv('WHATSAPP_VERIFY_TOKEN');
+  } catch {
+    console.error('[WhatsApp.Webhook] missing_required_env:WHATSAPP_VERIFY_TOKEN');
+    throw new Error('missing_required_env:WHATSAPP_VERIFY_TOKEN');
+  }
+}
+
 function timingSafeEquals(a: string, b: string): boolean {
   const left = Buffer.from(a);
   const right = Buffer.from(b);
@@ -172,10 +181,10 @@ export async function GET(req: Request): Promise<Response> {
   const mode = url.searchParams.get('hub.mode');
   const token = url.searchParams.get('hub.verify_token');
   const challenge = url.searchParams.get('hub.challenge');
-  let expectedToken = '';
 
+  let expectedToken = '';
   try {
-    expectedToken = assertRequiredEnv('WHATSAPP_VERIFY_TOKEN');
+    expectedToken = getRequiredVerifyToken();
   } catch {
     return new Response('Server Misconfigured', {
       status: 500,
@@ -186,7 +195,7 @@ export async function GET(req: Request): Promise<Response> {
     });
   }
 
-  if (mode === 'subscribe' && token && expectedToken && timingSafeEquals(token, expectedToken)) {
+  if (mode === 'subscribe' && token && timingSafeEquals(token, expectedToken)) {
     return new Response(challenge ?? '', {
       status: 200,
       headers: {
