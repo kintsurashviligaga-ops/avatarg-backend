@@ -9,6 +9,7 @@ import { captureException } from '@/lib/monitoring/errorTracker';
 import { recordWebhookError, recordWebhookLatency, recordWebhookRequest } from '@/lib/monitoring/metrics';
 import { enforceRateLimit } from '@/lib/security/rateLimit';
 import { verifyMetaSignature } from '@/lib/security/signature';
+import { RedisMisconfiguredError } from '@/lib/redis';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -175,12 +176,31 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
-  const rateLimit = await enforceRateLimit({
-    route: 'webhooks_whatsapp',
-    ip: getRequestIp(req),
-    limit: RATE_MAX_REQUESTS,
-    windowSec: RATE_WINDOW_SEC,
-  });
+  let rateLimit;
+  try {
+    rateLimit = await enforceRateLimit({
+      route: 'webhooks_whatsapp',
+      ip: getRequestIp(req),
+      limit: RATE_MAX_REQUESTS,
+      windowSec: RATE_WINDOW_SEC,
+    });
+  } catch (error) {
+    if (error instanceof RedisMisconfiguredError) {
+      status = 500;
+      recordWebhookError('whatsapp');
+      return Response.json(
+        {
+          error: 'server_misconfigured',
+          missing: error.missing,
+        },
+        {
+          status,
+          headers: corsHeaders(),
+        }
+      );
+    }
+    throw error;
+  }
 
   if (!rateLimit.ok) {
     status = 429;

@@ -20,6 +20,16 @@ export type BackendEnvStatus = {
   PUBLIC_APP_URL: boolean;
 };
 
+export class EnvValidationError extends Error {
+  missing: string[];
+
+  constructor(missing: string[]) {
+    super(`missing_required_env:${missing.join(',')}`);
+    this.name = 'EnvValidationError';
+    this.missing = missing;
+  }
+}
+
 function hasValue(value: string | undefined): boolean {
   return Boolean(String(value || '').trim());
 }
@@ -58,6 +68,20 @@ export function assertRequiredEnv(name: keyof BackendEnvStatus): string {
 
 export function getMissingEnvNames(names: Array<keyof BackendEnvStatus>): string[] {
   return names.filter((name) => !hasValue(process.env[name]));
+}
+
+export function requireRuntimeEnv(names: Array<keyof BackendEnvStatus>): Record<string, string> {
+  const missing = getMissingEnvNames(names);
+  if (missing.length > 0) {
+    throw new EnvValidationError(missing.map((name) => String(name)));
+  }
+
+  const values: Record<string, string> = {};
+  for (const name of names) {
+    values[String(name)] = String(process.env[name] || '').trim();
+  }
+
+  return values;
 }
 
 export function getAllowedOrigin(): string | null {

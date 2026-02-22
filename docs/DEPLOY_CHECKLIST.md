@@ -67,6 +67,10 @@ Metrics endpoint:
 
 `curl -i "https://avatarg-backend.vercel.app/api/metrics"`
 
+Production Redis health assertion:
+
+`BACKEND_BASE_URL=https://avatarg-backend.vercel.app npm run smoke:health:prod`
+
 Expected outcomes:
 
 - Health -> `200` with `{ "ok": true }`
@@ -75,3 +79,25 @@ Expected outcomes:
 - WhatsApp POST -> `200` quickly with `{ "ok": true }`
 - Telegram setup -> `200` with `{ "ok": true }`
 - Telegram POST -> `200` with `{ "ok": true }`
+
+## 7) Vercel Env Reliability (Critical)
+
+If Vercel says `variable already exists` / `No env variables were created`, it usually means the key already exists in that target environment.
+
+Use this sequence:
+
+1. Vercel Project -> Settings -> Environment Variables
+2. Find existing key (`UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`) and **Edit**, do not re-create
+3. Save for all required targets (Production / Preview)
+4. Trigger redeploy so runtime picks up changes:
+	- Deployments -> latest -> `...` -> `Redeploy`
+	- enable `Use existing Build Cache` (optional)
+5. Verify with:
+	- `curl https://avatarg-backend.vercel.app/api/health`
+	- `npm run smoke:health:prod`
+
+Expected in health payload:
+
+- `checks.redis.enabled: true`
+- `checks.redis.ok: true`
+- `checks.redis.latencyMs` is present

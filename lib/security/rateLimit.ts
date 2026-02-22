@@ -1,4 +1,5 @@
 import { logStructured } from '@/lib/logging/logger';
+import { RedisMisconfiguredError, redisPipeline, redisPing } from '@/lib/redis';
 
 type LimitResult = {
   ok: boolean;
@@ -14,17 +15,6 @@ type MemoryRecord = {
 
 const memoryStore = new Map<string, MemoryRecord>();
 let warnedFallback = false;
-
-function getRedisConfig(): { url: string; token: string } | null {
-  const url = String(process.env.UPSTASH_REDIS_REST_URL || '').trim();
-  const token = String(process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
-
-  if (!url || !token) {
-    return null;
-  }
-
-  return { url: url.replace(/\/$/, ''), token };
-}
 
 function cleanupMemory(now: number): void {
   for (const [key, record] of memoryStore.entries()) {
@@ -55,45 +45,38 @@ function memoryLimit(key: string, limit: number, windowMs: number): LimitResult 
 }
 
 async function upstashLimit(key: string, limit: number, windowSec: number): Promise<LimitResult> {
-  const config = getRedisConfig();
-  if (!config) {
+  const strict = process.env.NODE_ENV === 'production';
+
+  let payload: Array<{ result?: unknown }> | null = null;
+  try {
+    payload = await redisPipeline(
+      [
+        ['INCR', key],
+        ['EXPIRE', key, windowSec, 'NX'],
+        ['TTL', key],
+      ],
+      { strict }
+    );
+  } catch (error) {
+    if (error instanceof RedisMisconfiguredError) {
+      throw error;
+    }
+
+    if (!warnedFallback) {
+      warnedFallback = true;
+      logStructured('warn', 'rate_limit.upstash_unavailable', { event: 'rate_limiter_fallback' });
+    }
+    return memoryLimit(key, limit, windowSec * 1000);
+  }
+
+  if (!payload) {
     if (!warnedFallback) {
       warnedFallback = true;
       logStructured('warn', 'rate_limit.memory_fallback', { event: 'rate_limiter_fallback' });
     }
-
     return memoryLimit(key, limit, windowSec * 1000);
   }
 
-  const pipelineUrl = `${config.url}/pipeline`;
-  const body = JSON.stringify([
-    ['INCR', key],
-    ['EXPIRE', key, windowSec, 'NX'],
-    ['TTL', key],
-  ]);
-
-  const response = await fetch(pipelineUrl, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.token}`,
-      'Content-Type': 'application/json',
-    },
-    body,
-    cache: 'no-store',
-  });
-
-  if (!response.ok) {
-    if (!warnedFallback) {
-      warnedFallback = true;
-      logStructured('warn', 'rate_limit.upstash_unavailable', {
-        status: response.status,
-        event: 'rate_limiter_fallback',
-      });
-    }
-    return memoryLimit(key, limit, windowSec * 1000);
-  }
-
-  const payload = (await response.json().catch(() => null)) as Array<{ result?: number }> | null;
   const current = Number(payload?.[0]?.result || 0);
   const ttl = Number(payload?.[2]?.result || 0);
   const retryAfterSec = current > limit ? Math.max(1, ttl) : 0;
@@ -117,16 +100,9 @@ export async function enforceRateLimit(input: {
 }
 
 export async function pingRateLimitBackend(): Promise<{ ok: boolean; mode: 'upstash' | 'memory' }> {
-  const config = getRedisConfig();
-  if (!config) {
-    return { ok: true, mode: 'memory' };
-  }
-
-  const response = await fetch(`${config.url}/ping`, {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${config.token}` },
-    cache: 'no-store',
-  });
-
-  return { ok: response.ok, mode: 'upstash' };
+  const ping = await redisPing({ strict: false });
+  return {
+    ok: ping.ok,
+    mode: ping.enabled ? 'upstash' : 'memory',
+  };
 }

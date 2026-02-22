@@ -1,9 +1,11 @@
 import { getMetricsSnapshot } from '@/lib/monitoring/metrics';
+import { getRequestId, jsonHeadersWithRequestId } from '@/lib/logging/request';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-export async function GET(): Promise<Response> {
+export async function GET(req: Request): Promise<Response> {
+  const requestId = getRequestId(req);
   return Response.json(
     {
       ok: true,
@@ -12,7 +14,7 @@ export async function GET(): Promise<Response> {
     },
     {
       status: 200,
-      headers: { 'Cache-Control': 'no-store' },
+      headers: jsonHeadersWithRequestId(requestId, { 'Cache-Control': 'no-store' }),
     }
   );
 }

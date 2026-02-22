@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test:webhooks": "node scripts/test-webhooks.mjs",
     "smoke:health": "node scripts/smoke-health.mjs",
+    "smoke:health:prod": "node scripts/smoke-health-prod.mjs",
     "smoke:webhook:whatsapp": "node scripts/smoke-webhook-whatsapp.mjs",
     "smoke:webhook:telegram": "node scripts/smoke-webhook-telegram.mjs"
   },

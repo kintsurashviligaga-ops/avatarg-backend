@@ -8,6 +8,7 @@ import { recordFailureAndAlert } from '@/lib/monitoring/alerts';
 import { captureException } from '@/lib/monitoring/errorTracker';
 import { recordWebhookError, recordWebhookLatency, recordWebhookRequest } from '@/lib/monitoring/metrics';
 import { enforceRateLimit } from '@/lib/security/rateLimit';
+import { RedisMisconfiguredError } from '@/lib/redis';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -113,12 +114,22 @@ export async function POST(req: Request): Promise<Response> {
     return Response.json({ error: 'forbidden' }, { status: 403, headers: corsHeaders() });
   }
 
-  const rateLimit = await enforceRateLimit({
-    route: 'webhooks_telegram',
-    ip: getRequestIp(req),
-    limit: RATE_MAX_REQUESTS,
-    windowSec: RATE_WINDOW_SEC,
-  });
+  let rateLimit;
+  try {
+    rateLimit = await enforceRateLimit({
+      route: 'webhooks_telegram',
+      ip: getRequestIp(req),
+      limit: RATE_MAX_REQUESTS,
+      windowSec: RATE_WINDOW_SEC,
+    });
+  } catch (error) {
+    if (error instanceof RedisMisconfiguredError) {
+      status = 500;
+      recordWebhookError('telegram');
+      return Response.json({ error: 'server_misconfigured', missing: error.missing }, { status, headers: corsHeaders() });
+    }
+    throw error;
+  }
 
   if (!rateLimit.ok) {
     status = 429;

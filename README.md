@@ -10,6 +10,7 @@ Production-hardened Next.js serverless API for WhatsApp + Telegram webhooks.
 4. Run checks:
    - `npm run typecheck`
    - `npm run smoke:health`
+   - `npm run smoke:health:prod` (against deployed backend)
    - `npm run smoke:webhook:whatsapp`
    - `npm run smoke:webhook:telegram`
 
@@ -39,3 +40,7 @@ Production-hardened Next.js serverless API for WhatsApp + Telegram webhooks.
 
 - `GET /api/health`
 - `GET /api/metrics`
+
+## Vercel env changes
+
+After updating `UPSTASH_REDIS_REST_URL` or `UPSTASH_REDIS_REST_TOKEN`, redeploy in Vercel. Runtime env changes are not guaranteed to apply to already-running serverless instances until a new deployment is active.
