@@ -1,3 +1,4 @@
+import '@/lib/bootstrap';
 import { randomUUID } from 'node:crypto';
 import { getAllowedOrigin, getMissingEnvNames } from '@/lib/env';
 import { logStructured } from '@/lib/logging/logger';
@@ -17,6 +18,7 @@ export const dynamic = 'force-dynamic';
 const RATE_WINDOW_SEC = 60;
 const RATE_MAX_REQUESTS = 120;
 const MAX_PAYLOAD_BYTES = 1_000_000;
+const TELEGRAM_IDEMPOTENCY_TTL_SEC = 24 * 60 * 60;
 
 function corsHeaders(): HeadersInit {
   const allowedOrigin = getAllowedOrigin();
@@ -197,16 +199,19 @@ export async function POST(req: Request): Promise<Response> {
       return typeof root?.update_id === 'number' ? String(root.update_id) : undefined;
     })();
 
-    eventId = buildEventId({
-      platform: 'telegram',
-      rawBody,
-      messageIds: messages.map((msg) => msg.messageId),
-      fallbackId: fallbackUpdateId,
-    });
+    eventId = fallbackUpdateId
+      ? `telegram:update:${fallbackUpdateId}`
+      : buildEventId({
+          platform: 'telegram',
+          rawBody,
+          messageIds: messages.map((msg) => msg.messageId),
+          fallbackId: fallbackUpdateId,
+        });
 
     const claim = await claimWebhookEvent({
       platform: 'telegram',
       eventId,
+      ttlSec: TELEGRAM_IDEMPOTENCY_TTL_SEC,
       requestId,
     });
 

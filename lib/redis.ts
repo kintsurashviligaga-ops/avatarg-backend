@@ -168,6 +168,8 @@ export async function redisPing(options: { strict: boolean }): Promise<{ ok: boo
   }
 }
 
-if (process.env.NODE_ENV === 'production') {
+const isBuildPhase = String(process.env.NEXT_PHASE || '').trim() === 'phase-production-build';
+
+if (process.env.NODE_ENV === 'production' && !isBuildPhase) {
   readRedisConfig(true);
 }

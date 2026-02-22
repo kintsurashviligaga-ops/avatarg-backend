@@ -1,3 +1,4 @@
+import '@/lib/bootstrap';
 import { randomUUID } from 'node:crypto';
 import { assertRequiredEnv, getAllowedOrigin, getMissingEnvNames } from '@/lib/env';
 import { logStructured } from '@/lib/logging/logger';
@@ -262,7 +263,7 @@ export async function POST(req: Request): Promise<Response> {
 
   const appSecret = String(process.env.META_APP_SECRET || '').trim();
   if (!verifyMetaSignature(rawBody, req.headers, appSecret)) {
-    status = 403;
+    status = 401;
     recordWebhookError('whatsapp');
     logStructured('warn', 'whatsapp.signature_invalid', {
       requestId,
@@ -273,10 +274,10 @@ export async function POST(req: Request): Promise<Response> {
     });
     return Response.json(
       {
-        error: 'forbidden',
+        error: 'unauthorized',
       },
       {
-        status: 403,
+        status: 401,
         headers: corsHeaders(),
       }
     );

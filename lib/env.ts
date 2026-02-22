@@ -20,6 +20,31 @@ export type BackendEnvStatus = {
   PUBLIC_APP_URL: boolean;
 };
 
+export const REQUIRED_ENV_NAMES: Array<keyof BackendEnvStatus> = [
+  'META_APP_SECRET',
+  'WHATSAPP_VERIFY_TOKEN',
+  'WHATSAPP_ACCESS_TOKEN',
+  'WHATSAPP_PHONE_NUMBER_ID',
+  'WHATSAPP_BUSINESS_ACCOUNT_ID',
+  'UPSTASH_REDIS_REST_URL',
+  'UPSTASH_REDIS_REST_TOKEN',
+  'SUPABASE_URL',
+  'SUPABASE_SERVICE_ROLE_KEY',
+  'FRONTEND_URL',
+];
+
+export const OPTIONAL_ENV_NAMES: Array<keyof BackendEnvStatus> = [
+  'TELEGRAM_BOT_TOKEN',
+  'TELEGRAM_WEBHOOK_SECRET',
+  'TELEGRAM_SETUP_SECRET',
+  'SENTRY_DSN',
+  'ALERT_TELEGRAM_BOT_TOKEN',
+  'ALERT_TELEGRAM_CHAT_ID',
+  'CRON_SECRET',
+  'SITE_URL',
+  'PUBLIC_APP_URL',
+];
+
 export class EnvValidationError extends Error {
   missing: string[];
 
@@ -119,4 +144,34 @@ export function shortVersion(): string {
   }
 
   return 'dev';
+}
+
+export function isTelegramEnabled(): boolean {
+  const explicit = String(process.env.TELEGRAM_ENABLED || '').trim().toLowerCase();
+  if (explicit === 'true') {
+    return true;
+  }
+
+  return hasValue(process.env.TELEGRAM_BOT_TOKEN);
+}
+
+let bootValidationCompleted = false;
+
+export function validateBootEnvOrThrow(): void {
+  if (bootValidationCompleted) {
+    return;
+  }
+
+  const required = [...REQUIRED_ENV_NAMES];
+  if (isTelegramEnabled()) {
+    required.push('TELEGRAM_BOT_TOKEN');
+  }
+
+  const missing = getMissingEnvNames(required);
+  if (missing.length > 0) {
+    console.error(`[BOOT_ENV_VALIDATION] missing required env: ${missing.join(', ')}`);
+    throw new EnvValidationError(missing.map((name) => String(name)));
+  }
+
+  bootValidationCompleted = true;
 }

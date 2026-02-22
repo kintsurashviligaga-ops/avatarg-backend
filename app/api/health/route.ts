@@ -1,4 +1,6 @@
+import '@/lib/bootstrap';
 import { getBackendEnvStatus, shortVersion } from '@/lib/env';
+import { OPTIONAL_ENV_NAMES, REQUIRED_ENV_NAMES, isTelegramEnabled } from '@/lib/env';
 import { logStructured } from '@/lib/logging/logger';
 import { getRequestId, jsonHeadersWithRequestId } from '@/lib/logging/request';
 import { checkMemoryConnectivity } from '@/lib/memory/store';
@@ -16,7 +18,17 @@ export async function GET(req: Request): Promise<Response> {
     checkMemoryConnectivity(),
   ]);
 
-  const ok = redis.ok && memory.ok && redis.enabled;
+  const required = [...REQUIRED_ENV_NAMES, ...(isTelegramEnabled() ? (['TELEGRAM_BOT_TOKEN'] as const) : [])];
+  const optional = OPTIONAL_ENV_NAMES;
+  const requiredMissing = required.filter((name) => !env[name]);
+  const optionalMissing = optional.filter((name) => !env[name]);
+  const envIntegrity = {
+    requiredOk: requiredMissing.length === 0,
+    requiredMissing,
+    optionalMissing,
+  };
+
+  const ok = redis.ok && memory.ok && redis.enabled && envIntegrity.requiredOk;
   const status = ok ? 200 : 503;
   const latencyMs = Date.now() - startedAt;
 
@@ -45,8 +57,13 @@ export async function GET(req: Request): Promise<Response> {
           latencyMs: redis.latencyMs,
           ...(redis.missing ? { missing: redis.missing } : {}),
         },
+        supabase: {
+          ok: memory.ok,
+          mode: memory.mode,
+        },
         memory,
       },
+      envIntegrity,
       env,
     },
     {
